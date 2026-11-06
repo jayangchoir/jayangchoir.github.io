@@ -14,6 +14,7 @@ import { staffView } from './views-staff.js';
 
 const PARENT_NAV = [['home', '홈', 'home'], ['schedule', '일정', 'cal'], ['songs', '연주곡', 'music'], ['videos', '영상', 'video'], ['photos', '사진', 'photo'], ['roster', '명단', 'people']];
 const PARENT_ROUTES = new Set(['home', 'schedule', 'songs', 'videos', 'photos', 'roster', 'notices']);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 export async function start({ core, access, session, read, limit, demo = false, uploadsDb }) {
   initModal();
@@ -66,6 +67,22 @@ export async function start({ core, access, session, read, limit, demo = false, 
     for (const img of root.querySelectorAll('img[data-fid]')) io.observe(img);
   };
 
+  // ----- 공개 페이지 먼저 -----
+  // 소개·입단 안내·로그인 화면은 이 기기 저장소(IndexedDB: core.ready, 기억한 로그인)를 기다리지 않고 먼저 그린다.
+  // IndexedDB 가 느리거나 막힌 브라우저에서도 빈 화면에 머물지 않는다. 공개 페이지를 1.5초 안에 못 받으면 기본 소개부터,
+  // 다 받으면 아래에서 다시 그린다. 처음 설정 전(keyring.json·공개 페이지 없음 → 404)이면 기본 소개 + 관리자용 «처음 설정»
+  let pubOk = false;
+  let started = false;
+  const pubP = session.loadPublic().then(() => { pubOk = true; });
+  const early = () => !started && ['', 'join', 'login'].includes(route()[0] || '') && !core.hasJoinLink(location.hash);
+  const onEarlyHash = () => { if (early()) { render(); window.scrollTo(0, 0); } };
+  addEventListener('hashchange', onEarlyHash);
+  if (early()) {
+    await Promise.race([pubP, sleep(1500)]);
+    if (early()) render();
+  }
+  await Promise.race([pubP, sleep(10000)]);
+
   // ----- 상태 -----
   await core.ready;
   if (core.hasJoinLink(location.hash)) {
@@ -76,7 +93,9 @@ export async function start({ core, access, session, read, limit, demo = false, 
     history.replaceState(null, '', `${location.pathname}#/admin`);
   }
   if (core.status().connected) { try { await core.resume(); } catch (e) { console.warn(e); } }
-  try { await session.load(); } catch (e) { console.warn(e); }
+  try { await session.load({ skipPublic: pubOk }); } catch (e) { console.warn(e); }
+  started = true;
+  removeEventListener('hashchange', onEarlyHash);
   if (core.status().open) ctx.uploads.kick();
 
   core.onStatus(() => paintTop(ctx));

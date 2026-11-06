@@ -49,10 +49,13 @@ h3 { font-size: 18px; margin: 0 0 6px; line-height: 1.35; }
   background: rgba(255, 255, 255, .92); backdrop-filter: blur(10px); border-bottom: 1px solid var(--line);
 }
 .brand { display: flex; align-items: center; gap: 8px; text-decoration: none; color: var(--text); font-family: 'Jua', sans-serif; font-size: 18px; white-space: nowrap; min-width: 0; }
-.brand img { width: 30px; height: 30px; }
+.brand img { width: 30px; height: 30px; flex: none; }
 .brand b { font-weight: 400; color: var(--brand); }
+/* 좁은 휴대폰: 오른쪽 버튼(로그인 등)은 그대로, 줄어드는 것은 이름 글자 (잘리면 …) */
+.brand span { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
 .nav { display: none; }
-.top-right { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+.top-right { margin-left: auto; display: flex; align-items: center; gap: 6px; flex: none; }
+.setup-hint { text-align: center; margin: 14px 0 0; }
 .icon-btn { position: relative; display: inline-grid; place-items: center; width: 40px; height: 40px; border-radius: 12px; border: 0; background: transparent; color: var(--text-2); cursor: pointer; text-decoration: none; }
 .icon-btn:hover { background: var(--surface-2); }
 .dot { position: absolute; top: 7px; right: 7px; width: 9px; height: 9px; border-radius: 50%; background: var(--rose); border: 2px solid #fff; }

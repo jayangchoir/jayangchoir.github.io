@@ -8,7 +8,7 @@ import { ITEM } from './access-config.js';
 import { readEntry, readThumb, fetchPublic } from './media.js';
 
 export function createSession({ access, core = null, read = fetchPublic } = {}) {
-  const st = { pub: null, bundle: null, albums: new Map(), staff: null, staffItems: [], notice: '', offline: false, admin: null };
+  const st = { pub: null, bundle: null, albums: new Map(), staff: null, staffItems: [], notice: '', offline: false, admin: null, preSetup: false };
 
   async function loadContent() {
     st.bundle = null;
@@ -40,11 +40,19 @@ export function createSession({ access, core = null, read = fetchPublic } = {}) 
     try { st.admin = await access.openAdmin(core); } catch (e) { console.warn('[session] openAdmin', e); st.notice = e.message; }
   }
 
-  async function load() {
-    st.notice = '';
+  // 공개 페이지만 (GitHub Pages 에서 바로, 이 기기 저장소 IndexedDB 는 쓰지 않음 → 첫 화면을 먼저 그릴 수 있다).
+  // 아직 게시한 공개 페이지가 없으면 keyring.json 도 본다: 없으면(404) 처음 설정 전 → 공개 화면에 관리자용 «처음 설정»
+  async function loadPublic() {
     try {
       st.pub = (await access.list('public')).find(i => i.id === ITEM.public)?.data || null;
+      st.preSetup = st.pub ? false : !(await access.keyring());
     } catch (e) { if (e.code === 'offline') st.offline = true; else console.warn(e); }
+  }
+
+  // skipPublic: 방금 loadPublic 으로 받았으면 다시 받지 않는다
+  async function load({ skipPublic = false } = {}) {
+    st.notice = '';
+    if (!skipPublic) await loadPublic();
     await access.resume();
     await openAdminIfNeeded();
     await loadContent();
@@ -69,7 +77,8 @@ export function createSession({ access, core = null, read = fetchPublic } = {}) 
   const role = () => access.me()?.role || 'public';
 
   return {
-    load, login, logout, loadContent, openAdminIfNeeded,
+    load, loadPublic, login, logout, loadContent, openAdminIfNeeded,
+    get preSetup() { return !!st.preSetup; },
     has: tier => access.canSee(tier),
     album: async meta => st.albums.get(meta.id) || { id: meta.id, photos: [] },
     file: (id, e, onProgress) => readEntry(id, e, read, onProgress),

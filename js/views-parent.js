@@ -24,8 +24,16 @@ export const newNotices = b => { const s = seenAt(); return (b?.notices || []).f
 
 // ---------- 공개 페이지 (누구나) ----------
 const DEFAULT_PUB = { title: '자양교회 어린이 합창단', tagline: '함께 노래하는 어린이 합창단', intro: '', activity: '', join: '' };
+// 관리자가 공개 페이지를 아직 게시하지 않았을 때(처음 설정 전 포함)만 쓰는 기본 글. 사실(시간·장소·대상)은 넣지 않는다 —
+// 그건 관리자 → 공개 페이지에서 쓴다
+const PLACEHOLDER_PUB = {
+  intro: '자양교회 어린이 합창단 소개 페이지예요.\n합창단 소개와 입단 안내, 공연 소식은 준비되는 대로 이곳에 올려 드릴게요.',
+  join: '입단 안내를 준비하고 있어요. 준비되는 대로 이곳에 올려 드릴게요.',
+};
 export function publicView(ctx, r) {
-  const p = { ...DEFAULT_PUB, ...(ctx.session.pub || {}) };
+  const p = { ...DEFAULT_PUB, ...(ctx.session.pub || PLACEHOLDER_PUB) };
+  const setup = ctx.session.role === 'public' && ctx.session.preSetup
+    ? '<p class="small muted setup-hint">관리자이신가요? 사이트를 아직 처음 설정하지 않았어요. <a class="btn small ghost" href="#/admin">처음 설정</a></p>' : '';
   const logged = ctx.session.role !== 'public';
   const loginBtn = logged ? `<a class="btn primary" href="#/home">${icon('home')} 내 화면으로</a>` : `<a class="btn primary" href="#/login">${icon('lock')} 로그인</a>`;
   if (r[0] === 'join') {
@@ -33,7 +41,7 @@ export function publicView(ctx, r) {
       <h1 style="margin-top:8px">입단 안내</h1>
       <div class="card"><div class="txt">${textHtml(p.join || '입단 안내를 준비하고 있어요.')}</div></div>
       ${p.contactNote ? `<div class="card info-card"><h3>${icon('phone')} 문의</h3><div class="txt">${textHtml(p.contactNote)}</div></div>` : ''}
-      <div class="row">${loginBtn}</div>`;
+      <div class="row">${loginBtn}</div>${setup}`;
   }
   return `<section class="hero pub-hero">${NOTE_SVG}<h1>${esc(p.title)}</h1><p>${esc(p.tagline || '')}</p>
       <div class="row" style="margin-top:16px">${logged ? `<a class="btn" href="#/home">${icon('home')} 내 화면으로</a>` : `<a class="btn" href="#/login">${icon('lock')} 로그인</a>`}<a class="btn ghost-light" href="#/join">입단 안내</a></div></section>
@@ -42,7 +50,7 @@ export function publicView(ctx, r) {
     ${p.activity ? `<div class="card info-card"><h3>${icon('music')} 이렇게 활동해요</h3><div class="txt">${textHtml(p.activity)}</div></div>` : ''}
     ${(p.videos || []).length ? `<div class="sec-title"><h2>공연 영상</h2></div>${p.videos.map(v => `<div class="card vid-card home-vid"><span class="small muted">${esc(dateDot(v.date))}</span><h3>${esc(v.title)}</h3><div class="yt-grid">${v.urls.map(u => ytBox(u, v.title)).join('')}</div></div>`).join('')}` : ''}
     ${p.youtube ? `<a class="btn soft block" href="${esc(p.youtube)}" target="_blank" rel="noopener noreferrer">${icon('yt')} 유튜브 채널</a>` : ''}
-    <p class="small muted" style="text-align:center;margin-top:24px">일정·연주곡·악보·사진은 합창단 가족만 볼 수 있어요. 초대 메시지의 이름과 코드로 로그인해 주세요.</p>`;
+    <p class="small muted" style="text-align:center;margin-top:24px">일정·연주곡·악보·사진은 합창단 가족만 볼 수 있어요. 초대 메시지의 이름과 코드로 로그인해 주세요.</p>${setup}`;
 }
 
 // ---------- 로그인 (모든 역할이 한 곳에서) ----------
