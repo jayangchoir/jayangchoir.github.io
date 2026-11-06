@@ -12,8 +12,9 @@
 | `crypto.js` | AES-256-GCM, PBKDF2, 복구 코드 |
 | `github.js` | GitHub 백엔드 (`tree/get/put/check` + access 용 `head/commit/createRepo`, 지우는 함수 없음), `publicReader` |
 | `fake-backend.js` | 시험용 메모리 백엔드 (`FakeRepo`, 여러 저장소 `FakeGitHub`) |
-| `access.js` | 등급별 보기 권한: 역할 설정 · 코드 로그인 · 봉투 암호화 · 사람 관리 · 공개 저장소에 올리기 |
+| `access.js` | 등급별 보기 권한: 역할 설정 · 코드 로그인 · 봉투 암호화 · 사람 관리(한 명·여러 명) · 공개 저장소에 올리기(한 개·여러 개, 커밋 하나) |
 | `access-ui.js` | 한국어 화면 조각: 로그인 카드 · 안내문(복사·인쇄) · 사람 명단 · 막기 확인 |
+| `access-ui.css` | 화면 조각의 모양 (`ax-*`). 사이트가 `<link>` 로 넣는다 (엄격한 CSP 용, 인라인 style 없음) |
 | `kv.js` | IndexedDB 키-값 (메모리 대체) |
 | `image.js` | 사진 줄이기 (긴 변 1600px, EXIF 제거) |
 | `qrcode.js` | qrcode-generator 1.4.4 (MIT) + `export default` 한 줄 |
@@ -159,7 +160,11 @@ const access = createAccess({
 - `publish({ id?, tier, data })` — 글(JSON). 고칠 때마다 새 항목 열쇠
 - `publishFile(blob, { tier, name?, type?, data?, resize? })` → `{ id, repo, path, size }` — 파일 저장소 `<site>-files-N` 에 암호화해 올린다. 한도(900MB)를 넘게 되면 쓰기 토큰으로 다음 저장소를 만든다. 95MB 넘는 파일은 거부(동영상은 링크로)
 - `unpublish(id, tier)` / `restore(id, tier)` — 휴지통 (암호문·파일은 지우지 않음)
-- 공개 저장소에는 **커밋 하나**로 올린다 (git trees API). 누가 먼저 올렸으면 다시 읽어 합친 뒤 다시.
+- `publishMany(items, { message? })` → `[{ id, tier, done, trash?, restore? }]` — 여러 글을 여러 등급에 걸쳐 **커밋 하나**로 (가져오기·게시용).
+  `items`: `{ id?, tier, data }`(올리기, `publish` 와 같음) · `{ id, tier, trash: true }`(휴지통) · `{ id, tier, restore: true }`(되살리기).
+  휴지통·되살리기는 할 것이 없으면(없는 항목·이미 그 상태) `done: false`. 같은 항목이 두 번 있거나 파일 항목을 고치려 하면 `bad-id`, 읽기 역할은 `read-only`, 못 보는 등급은 `no-access` (아무것도 올리지 않음).
+  API 요청은 항목 수와 상관없이 `브랜치 끝 1 + 등급 목록 읽기 T + 커밋(1 + 바뀐 목록 수 + 3)` (T = 들어 있는 등급 수). 300개를 두 등급에 = 9번.
+- 공개 저장소에는 **커밋 하나**로 올린다 (git trees API). 누가 먼저 올렸으면(409) 다시 읽어 합친 뒤 다시 (6번까지, 그래도 안 되면 `busy`).
 
 ### 관리자
 ```js
@@ -174,12 +179,26 @@ const admin = await access.openAdmin(core);
   `code` 를 넣으면(가져온 인증번호) 그것을 쓰고, 40비트보다 약하면 `weak-code` (`acceptWeak: true` 로 알고 쓰기)
 - `admin.resetCode(id)` — 새 코드(예전 코드 바로 무효, 개인 열쇠도 새로). 막은 사람이면 다시 허용 (`reinstate(id)` 와 같음)
 - `admin.changeRole(id, role, labels)` — 낮추면 잃는 등급의 열쇠를 바꾼다 → `{ rotated, tokenExposed, recoveryCode }`
+- `admin.addPeople(rows, { acceptWeak?, atomic?, concurrency: 4, onProgress(done, total)? })` → 넣은 순서대로 `[{ person, code, invitation, bits, weak } | { error: { code, message }, input }]` —
+  여러 사람(CSV 수백 줄)을 **공개 저장소 커밋 하나**로. `rows` 는 `addPerson` 과 같은 모양 (줄마다 `code`·`acceptWeak` 가능).
+  같은 아이디(이미 있거나 같은 묶음 안에서 겹침)·약한 번호·없는 역할·직분 같은 잘못된 줄은 `error` 로 돌려주고 나머지는 넣는다. `atomic: true` 면 첫 오류를 던지고 아무것도 넣지 않는다.
+  걸리는 시간은 거의 사람마다 PBKDF2 60만 회(0.1~0.5초)라 4개씩 동시에 하고 `onProgress` 로 알린다. `addPerson` 도 이것을 한 줄로 부른다.
+- **API 요청 수 (GitHub 한도 5000번/시간)** — 사람 수 N 과 상관없다:
+  공개 사이트 저장소 = `브랜치 끝 1 + keyring 1(1MB 넘으면 2) + 등급 목록 T + 커밋(1 + 바뀐 파일 수 + 3)` (유년부 T=4 → 11번, forcsoz T=17 → 약 24번),
+  비공개 데이터 저장소(core) = 다음 동기화 때 `tree 1 + 바뀐 조각마다 PUT 1` (명단 `accessPeople` 조각 16개 + `accessSys` → 커밋 17개 이하).
+  예전처럼 한 줄씩 `addPerson` 하면 줄마다 공개 저장소 커밋 하나(11~24번)라 300줄 = 3300~7200번으로 한 시간 한도를 넘는다.
+  `access-test.html` 의 "큰 묶음" 시험이 300명에 공개 저장소 커밋 1개·요청 11번, 데이터 저장소 커밋 16개를 확인한다.
+- `admin.revokeMany(ids, { newToken? })` → `{ people, rotated, tokenExposed, recoveryCode }` — 여러 사람을 한 번에 막기. 등급 열쇠는 등급마다 **한 번만** 바꾸고 커밋 하나 (100명을 막아도 열쇠 판은 1 올라감).
+  이미 막은 사람만 있으면 아무것도 안 함(`rotated: []`). 없는 id 는 `not-found`, 나 자신은 `self` (아무것도 안 함). `revoke(id)` 도 이것을 한 명으로 부른다.
 - `admin.revoke(id, { newToken? })` — 자리를 지우고, 그 사람이 가졌던 등급 열쇠를 모두 바꾸고, 항목 열쇠·남은 사람 꾸러미를 다시 감싸 **커밋 하나**로 올린다.
   파일 암호문은 그대로. 쓰기 역할이었으면 `tokenExposed: true` → `admin.setToken(새토큰)` 후 예전 토큰을 GitHub에서 지운다. 관리자를 막으면 새 명단 복구 코드를 준다.
 - `admin.applySecretChange(request)` · `admin.setToken(token)` · `admin.newRecoveryCode()` · `admin.republish()` (올리다 끊겼을 때 다시 맞추기)
 - 관리자 코드를 잃었을 때: core 를 사이트 비밀번호로 연 뒤 `access.recoverAdmin(core, 명단복구코드)` → `admin.resetCode(내 id)`
 
-### 화면 조각 (access-ui.js)
+### 화면 조각 (access-ui.js · access-ui.css)
+모양은 `access-ui.css` 파일 하나 (이름은 모두 `ax-` 로 시작, 바꾸지 않음). 엄격한 CSP(`style-src 'self'`, `'unsafe-inline'` 없음)에서도 되게
+`<style>` 도 `style=""` 도 쓰지 않는다. 사이트 `<head>` 에 `<link rel="stylesheet" href="js/core/access-ui.css">` 를 넣을 것
+(넣지 않았으면 access-ui.js 가 처음 쓸 때 같은 파일을 `<link>` 로 붙인다 — 그래도 'self' 라 CSP 에 걸리지 않지만, 잠깐 모양 없이 보일 수 있다). 주소는 `CSS_URL`.
 ```js
 import { loginCard, invitationCard, printCard, peopleTable, confirmRevoke, revokeMessage } from './core/access-ui.js';
 el.append(loginCard({ access, onLogin: r => route(r.role) }));       // 아이디 + 코드, 역할 고르기 없음
@@ -210,7 +229,7 @@ el.append(invitationCard({ title, siteUrl, name, identifier, code, roleLabel }))
 기본은 `localSlotProvider({ fetchKeyring })` (keyring.json 을 이 기기에서 연다). 나중에 Cloudflare Worker(생일 + 횟수 제한, 이메일 OTP, 고객 DB 확인)가 같은 모양의 꾸러미를 돌려주면 화면은 그대로다.
 
 ### 다른 사이트에 옮기기 (jayangchoir · forcsoz)
-1. `js/core/` 를 통째로 복사한다 (`crypto · kv · github · image · core · access · access-ui`, 시험용 `fake-backend` 와 `core-test.html` · `access-test.html`).
+1. `js/core/` 를 통째로 복사한다 (`crypto · kv · github · image · core · access · access-ui · access-ui.css`, 시험용 `fake-backend` 와 `core-test.html` · `access-test.html`).
 2. `core.js` 의 `DEFAULT_REPO` 와 IndexedDB 이름(`index.js`)을 그 사이트 것으로 바꾼다.
 3. `createAccess({ site, title, owner, repo, siteUrl, roles, files })` 에 그 사이트의 역할표를 넣는다.
    - jayangchoir: `public → parent(가족마다 코드, 그만두면 막기) → admin`
@@ -224,7 +243,8 @@ el.append(invitationCard({ title, siteUrl, name, identifier, code, roleLabel }))
 - `core.js`: `DEFAULT_REPO` = `jayangchoir/jayangchoir-data`, IndexedDB `jayangchoir-core`, vault `app: 'jayangchoir'`, 백업 `kind: 'jayangchoir-core-backup'`,
   `COLLECTIONS` 에 합창단 목록(notices·events·songs·videos·albums·members·families·media·settings·accessSys·accessPeople), `media` 조각 64개,
   그리고 `core.backend(dev)` 하나 더함 — 같은 토큰으로 사진 저장소 `choir-photos-N` 에 올리고 만들 때.
-- `access.js`, `access-ui.js`, `github.js`, `fake-backend.js`, `ACCESS-SPEC.md`: 그대로 복사 (고치지 않음). 설정은 `js/access-config.js`.
+- `access.js`, `access-ui.js`, `access-ui.css`, `github.js`, `fake-backend.js`, `ACCESS-SPEC.md`: 그대로 복사 (고치지 않음). 설정은 `js/access-config.js`.
+- 반영(`js/publish.js`)은 바뀐 항목을 모아 `access.publishMany` 로 커밋 하나, "명단으로 가족 만들기"는 `addFamilies` → `admin.addPeople` 로 커밋 하나.
 - 사진·악보 PDF 는 `access.publishFile` 대신 `js/media.js`(choir-photos-N, 파일마다 키, 앨범마다 목록)를 쓴다.
   수천 장이 되면 등급 목록(`access/parent/index.json`)에 사진마다 한 줄씩 들어가 학부모 휴대폰이 매번 크게 받기 때문.
   사진 키는 학부모 등급 항목(`content`, `album-<id>`) 안에만 있으므로 가족을 막으면 똑같이 새 내용을 못 연다.

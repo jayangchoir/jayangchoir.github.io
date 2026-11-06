@@ -113,13 +113,19 @@ await test('관리자: core setup + access.setup(관리자 코드·명단 복구
 await test('가족 코드(형제는 한 가족, 이름=아이 이름) + 스탭 개인 코드 + 반영 → 공개 저장소에는 암호문과 평문 공개 페이지만', async () => {
   const sug = await pub.suggestFamilies();
   eq(sug.map(f => f.identifier).sort(), ['김하나', '박세찌', '이두리'], '연락처가 다른 세 가족');
-  for (const f of sug) FAM[f.identifier] = await pub.addFamily(f);
+  const c0 = siteRepo.commitLog.length;
+  const made = await pub.addFamilies(sug); // admin.addPeople → 공개 저장소 커밋 하나
+  eq(siteRepo.commitLog.length, c0 + 1, '가족 세 개 → 커밋 하나');
+  for (const [i, f] of sug.entries()) FAM[f.identifier] = made[i];
+  eq(sug.map(f => A.collection('families').get(FAM[f.identifier].person.id)?.memberIds?.length), sug.map(f => f.memberIds.length), '가족마다 아이 목록');
   assert(FAM['김하나'].invitation.includes(FAM['김하나'].code) && FAM['김하나'].invitation.includes('김하나'), '초대 안내문');
   STAFF1 = await admin.addPerson({ name: '박총무', identifier: '박총무', role: 'staff', labels: ['총무'] });
   STAFF2 = await admin.addPerson({ name: '이회계', identifier: '이회계', role: 'staff', labels: ['회계'] });
   await rejects(admin.addPerson({ name: 'x', identifier: ' 김하나 ', role: 'parent' }), 'duplicate', '같은 로그인 이름');
   await A.collection('settings').put({ id: 'public', title: '시험 합창단', intro: '함께 노래해요', join: '입단 문의는 교회 사무실로' });
+  const c1 = siteRepo.commitLog.length;
   const r = await pub.publish();
+  eq(siteRepo.commitLog.length, c1 + 1, `반영 ${r.changed}개 → 커밋 하나 (publishMany)`);
   for (const k of ['public/site', 'parent/content', 'staff/staff-info', `parent/album-${ids.album(FAKE.albums[0])}`]) assert(r.items.includes(k), `반영 항목 ${k}: ${r.items}`);
   const all = siteAll();
   for (const x of SECRETS) assert(!all.includes(x), `공개 저장소 글자에 "${x}"`);

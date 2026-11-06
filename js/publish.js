@@ -9,6 +9,7 @@
 // 올리기 전에 assertNoContacts 로 학부모·공개 항목을 한 번 더 훑는다 — 연락처가 보이면 올리지 않는다.
 // 바뀐 항목만 올린다. 무엇을 올렸는지는 settings/publish 에 지문(hash)으로 남긴다(관리자 기기끼리 같이 봄).
 // 가족 탈퇴·코드 회수·역할 바꾸기·열쇠 바꾸기는 access.js 의 admin(revoke 등)이 커밋 하나로 한다.
+// 반영은 바뀐 항목을 모두 모아 access.publishMany 로 커밋 하나, 가족 여러 개는 addFamilies(admin.addPeople)로 커밋 하나.
 
 import { buildBundle, buildPublic, assertNoContacts, sortMembers, SITE_PRIVATE, SITE_PUBLIC } from './bundle.js';
 import { ITEM } from './access-config.js';
@@ -89,21 +90,15 @@ export function createPublisher({ core, access, getAdmin = async () => null }) {
     const r = rec();
     const hashes = { ...(r.hashes || {}) };
     const done = [];
-    // 앨범 → 내용 → 공개 → 스탭 순서 (내용이 가리키는 앨범이 먼저 올라가 있게)
-    for (const it of items) {
-      if (!all && hashes[it.key] === it.hash) continue;
-      await access.publish({ id: it.id, tier: it.tier, data: it.data });
-      hashes[it.key] = it.hash;
-      done.push(it.key);
-    }
-    // 지운·숨긴 앨범은 휴지통으로 (암호문은 지우지 않음)
-    for (const k of Object.keys(hashes)) {
-      if (!k.startsWith('parent/album-') || items.some(x => x.key === k)) continue;
-      try { await access.unpublish(k.slice('parent/'.length), 'parent'); } catch (e) { if (e.code !== 'not-found') throw e; }
-      delete hashes[k];
-      done.push(`-${k}`);
-    }
-    if (!done.length) return { changed: 0, items: [] };
+    // 바뀐 항목 + 지운·숨긴 앨범(휴지통, 암호문은 지우지 않음)을 모아 공개 저장소 커밋 하나로 (access.publishMany).
+    // 한 커밋이라 내용(content)이 가리키는 앨범이 아직 없는 순간이 생기지 않는다
+    const todo = items.filter(it => all || hashes[it.key] !== it.hash);
+    const gone = Object.keys(hashes).filter(k => k.startsWith('parent/album-') && !items.some(x => x.key === k));
+    const batch = [...todo.map(it => ({ id: it.id, tier: it.tier, data: it.data })), ...gone.map(k => ({ id: k.slice('parent/'.length), tier: 'parent', trash: true }))];
+    if (!batch.length) return { changed: 0, items: [] };
+    await access.publishMany(batch, { message: `반영 ${batch.length}개` });
+    for (const it of todo) { hashes[it.key] = it.hash; done.push(it.key); }
+    for (const k of gone) { delete hashes[k]; done.push(`-${k}`); }
     await settings().put({ ...rec(), id: 'publish', hashes, publishedAt: new Date().toISOString(), publishedBy: me.name || core.status().user || '' });
     core.sync();
     return { changed: done.length, items: done };
@@ -137,5 +132,15 @@ export function createPublisher({ core, access, getAdmin = async () => null }) {
     return r;
   }
 
-  return { gather, compute, state, publish, buildStaff, suggestFamilies, addFamily, warnToken, clearTokenWarn };
+  // 가족 여러 개를 한 번에 (명단으로 가족 만들기) → 넣은 순서대로 [{ person, code, invitation } | { error, input }]
+  // admin.addPeople 로 공개 저장소 커밋 하나 (가족 수와 상관없음). 가족 목록(families)도 한 번에 저장
+  async function addFamilies(list, { onProgress } = {}) {
+    const admin = await getAdmin();
+    const res = await admin.addPeople(list.map(({ name, identifier }) => ({ name, identifier, role: 'parent' })), { onProgress });
+    const fams = res.map((r, i) => (r.person ? { id: r.person.id, memberIds: list[i].memberIds || [] } : null)).filter(Boolean);
+    if (fams.length) await core.collection('families').putMany(fams);
+    return res;
+  }
+
+  return { gather, compute, state, publish, buildStaff, suggestFamilies, addFamily, addFamilies, warnToken, clearTokenWarn };
 }

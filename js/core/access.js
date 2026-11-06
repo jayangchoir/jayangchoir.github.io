@@ -60,6 +60,14 @@ function canon(v) {
 }
 const same = (a, b) => canon(a) === canon(b);
 
+// n 개씩 동시에 (PBKDF2 처럼 오래 걸리는 일을 여러 개 할 때)
+async function pool(list, n, fn) {
+  let i = 0;
+  const run = async () => { while (i < list.length) { const j = i++; await fn(list[j], j); } };
+  await Promise.all(Array.from({ length: Math.min(n, list.length) }, run));
+}
+const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
 // ===================================================================
 // 역할 (설정으로 정한다)
 // ===================================================================
@@ -523,7 +531,7 @@ export function createAccess(config, opts = {}) {
   async function publish({ id, tier, data }) {
     needWrite(tier);
     id = id ? String(id) : uid();
-    if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) throw err('bad-id', `id 가 올바르지 않아요: ${id}`);
+    if (!ID_RE.test(id)) throw err('bad-id', `id 가 올바르지 않아요: ${id}`);
     await editIndex(tier, async (idx, k) => {
       if (idx.items[id]?.f) throw err('bad-id', '파일 항목은 publish 로 바꿀 수 없어요 (새 파일로 올려 주세요).');
       const { itemRaw, ...e } = await sealEntry(tier, id, k, { data });
@@ -532,11 +540,65 @@ export function createAccess(config, opts = {}) {
     return { id, tier };
   }
 
+  // 여러 글을 여러 등급에 걸쳐 커밋 하나로 → [{ id, tier, done }]. 가져오기(seed)·게시처럼 한 번에 많이 올릴 때.
+  //   items: [{ id?, tier, data }]                 올리기 (publish 와 같음, 고칠 때마다 새 항목 열쇠)
+  //          [{ id, tier, trash: true }]           휴지통 (unpublish 와 같음. 없거나 이미 휴지통이면 done:false)
+  //          [{ id, tier, restore: true }]         되살리기 (휴지통에 없으면 done:false)
+  // 등급마다 목록 파일 하나만 다시 쓴다 (GitHub trees API). 누가 먼저 올렸으면(409) 다시 읽어 합친 뒤 다시.
+  // API 요청: 브랜치 끝 1 + 등급 목록 읽기 T + 커밋(1 + 바뀐 목록 T + 3) — 항목 수와 상관없다
+  async function publishMany(list, { message } = {}) {
+    if (!Array.isArray(list)) throw err('bad-items', 'publishMany 에는 목록(배열)을 주세요.');
+    const ops = [];
+    const seen = new Set();
+    for (const it of list) {
+      const tier = it?.tier;
+      needWrite(tier);
+      const kind = it.trash ? 'trash' : it.restore ? 'restore' : 'put';
+      const id = it.id != null && it.id !== '' ? String(it.id) : kind === 'put' ? uid() : '';
+      if (!ID_RE.test(id)) throw err('bad-id', `id 가 올바르지 않아요: ${id}`);
+      if (seen.has(`${tier}/${id}`)) throw err('bad-id', `같은 항목이 두 번 있어요: ${tier}/${id}`);
+      seen.add(`${tier}/${id}`);
+      ops.push({ id, tier, kind, data: it.data });
+    }
+    if (!ops.length) return [];
+    const tierList = [...new Set(ops.map(o => o.tier))];
+    let done;
+    await commitSite(bundle.token, async get => {
+      done = new Map();
+      const files = [];
+      for (const tier of tierList) {
+        const idx = (await get(indexPath(tier))) || { v: 1, tier, kv: tier === 'public' ? 0 : bundle.keys[tier].kv, items: {} };
+        let k = null;
+        if (tier !== 'public') {
+          k = await keyFor(tier, idx.kv);
+          if (k.kv > idx.kv) throw err('stale', '열쇠를 바꾸는 중이에요. 잠시 뒤 다시 해 주세요.');
+        }
+        let changed = false;
+        for (const o of ops.filter(x => x.tier === tier)) {
+          const cur = idx.items[o.id];
+          let ok = false;
+          if (o.kind === 'put') {
+            if (cur?.f) throw err('bad-id', `파일 항목은 publishMany 로 바꿀 수 없어요: ${o.id}`);
+            const { itemRaw, ...e } = await sealEntry(tier, o.id, k, { data: o.data });
+            idx.items[o.id] = e;
+            ok = true;
+          } else if (o.kind === 'trash' && cur && !cur.del) { cur.del = nowISO(); ok = true; }
+          else if (o.kind === 'restore' && cur?.del) { delete cur.del; ok = true; }
+          done.set(`${tier}/${o.id}`, ok);
+          changed ||= ok;
+        }
+        if (changed) files.push({ path: indexPath(tier), bytes: pretty(idx) });
+      }
+      return files;
+    }, message || `올리기 ${ops.length}개: ${tierList.join(', ')}`);
+    return ops.map(o => ({ id: o.id, tier: o.tier, done: !!done?.get(`${o.tier}/${o.id}`), ...(o.kind !== 'put' ? { [o.kind]: true } : {}) }));
+  }
+
   // 파일 하나 올리기 → { id, tier, repo, path, size }. 파일 저장소가 limit 를 넘게 되면 다음 저장소(-files-N+1)를 만든다
   async function publishFile(blob, { tier, name, type, id, data, resize = false, maxDim = 1600, quality = 0.85 } = {}) {
     needWrite(tier);
     id = id ? String(id) : uid();
-    if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) throw err('bad-id', `id 가 올바르지 않아요: ${id}`);
+    if (!ID_RE.test(id)) throw err('bad-id', `id 가 올바르지 않아요: ${id}`);
     let src = blob;
     let w = 0;
     let h = 0;
@@ -714,11 +776,20 @@ export function createAccess(config, opts = {}) {
     }
     async function loadPeople() {
       const out = [];
-      for (const r of peo.list({ deleted: 'all' })) out.push(JSON.parse(await C.decryptText(await mKey(), r.sealed, `person:${r.id}`)));
+      const key = await mKey();
+      for (const r of peo.list({ deleted: 'all' })) out.push(JSON.parse(await C.decryptText(key, r.sealed, `person:${r.id}`)));
       return out;
     }
     async function savePerson(p) {
       await peo.put({ id: p.id, sealed: await C.encryptText(await mKey(), JSON.stringify(p), `person:${p.id}`) });
+    }
+    // 여러 사람을 한 번에 (core 의 조각마다 한 번만 저장 → 다음 동기화 때 조각 수만큼만 올라간다)
+    async function savePeople(list) {
+      if (!list.length) return;
+      const key = await mKey();
+      const recs = [];
+      for (const p of list) recs.push({ id: p.id, sealed: await C.encryptText(key, JSON.stringify(p), `person:${p.id}`) });
+      await peo.putMany(recs);
     }
     const coreKey = () => (core.status().open && core.vaultKey ? core.vaultKey() : null);
 
@@ -829,19 +900,88 @@ export function createAccess(config, opts = {}) {
       for (const l of labels) if (!allowed.includes(l)) throw err('bad-label', `'${roles.name(role)}' 에는 '${l}' 직분이 없어요.`);
       return [...labels];
     }
-    async function newSlotFor(p, { code, passphrase, acceptWeak }) {
-      let secret = code;
-      let kind = 'c';
-      let bits = ACCESS_CODE_BITS;
-      if (passphrase) { checkPassphrase(passphrase, { identifier: p.identifier, name: p.name }); secret = passphrase; kind = 'p'; bits = null; }
-      else if (code != null) {
-        bits = codeBits(normAccessCode(code));
+    // 코드·비밀문장 고르기 (확인만, 느린 일 없음). 약하면 AccessError
+    function pickSecret(p, { code, passphrase, acceptWeak }) {
+      if (passphrase) { checkPassphrase(passphrase, { identifier: p.identifier, name: p.name }); return { secret: passphrase, kind: 'p', bits: null }; }
+      if (code != null) {
+        const bits = codeBits(normAccessCode(code));
         if (bits < MIN_CODE_BITS && !acceptWeak) throw err('weak-code', `이 번호는 너무 쉽게 맞힐 수 있어요 (약 ${bits}비트, ${MIN_CODE_BITS}비트 이상 필요). 더 긴 번호를 쓰거나 자동으로 만든 코드를 쓰세요.`);
-      } else secret = newAccessCode();
+        return { secret: code, kind: 'c', bits };
+      }
+      return { secret: newAccessCode(), kind: 'c', bits: ACCESS_CODE_BITS };
+    }
+    // 자리 만들기 (PBKDF2 60만 회 — 한 사람에 0.1~0.5초)
+    async function sealSlot(p, { secret, kind, bits }) {
       p.pk = C.b64(rand32()); // 코드를 새로 줄 때마다 개인 열쇠도 새로 (예전 코드가 새어도 새 꾸러미는 못 열게)
       p.slot = await makeSlot({ secret, kind, pkRaw: C.unb64(p.pk), lid: p.lid, iter });
       p.secret = kind === 'p' ? 'passphrase' : 'code';
       return { code: kind === 'c' ? secret : null, bits, weak: bits != null && bits < MIN_CODE_BITS };
+    }
+    const newSlotFor = (p, o) => sealSlot(p, pickSecret(p, o));
+    // 새 사람 기록 (확인만). taken = 이미 쓰는 자리(lid)들 — 같은 묶음 안의 겹침도 잡는다
+    async function newPerson({ name, identifier, role, labels = [] }, state, taken) {
+      roles.get(role);
+      if (role === 'public') throw err('bad-role', '공개 등급은 로그인이 필요 없어요.');
+      if (!String(name ?? '').trim()) throw err('need-name', '이름을 넣어 주세요.');
+      if (!normIdentifier(identifier)) throw err('need-id', '아이디를 넣어 주세요.');
+      const lid = await lookupId(state.salt, identifier);
+      if (taken.has(lid)) throw err('duplicate', '같은 아이디를 쓰는 사람이 이미 있어요. 다른 아이디(예: 이름+숫자, 전화번호)를 정해 주세요.');
+      return { id: uid(), name: String(name).trim().slice(0, 60), identifier: String(identifier).trim(), lid, role, labels: checkLabels(role, labels), status: 'active', issuedAt: nowISO(), revokedAt: null };
+    }
+
+    // 여러 사람 추가 — 공개 저장소 커밋 하나 (+ 데이터 저장소는 다음 동기화 때 조각 수만큼, 사람 수와 상관없음)
+    async function addPeople(list, { acceptWeak = false, atomic = false, concurrency = 4, onProgress = () => {} } = {}) {
+      if (!Array.isArray(list)) throw err('bad-items', 'addPeople 에는 목록(배열)을 주세요.');
+      const state = await loadState();
+      const taken = new Set((await loadPeople()).filter(p => p.status === 'active').map(p => p.lid));
+      const out = new Array(list.length);
+      const todo = [];
+      for (const [i, row] of list.entries()) {
+        try {
+          const p = await newPerson(row || {}, state, taken);
+          const sec = pickSecret(p, { code: row.code, passphrase: row.passphrase, acceptWeak: row.acceptWeak ?? acceptWeak });
+          taken.add(p.lid);
+          todo.push({ i, p, sec });
+        } catch (e) {
+          if (atomic || !(e instanceof AccessError)) throw e;
+          out[i] = { error: { code: e.code, message: e.message }, input: row };
+        }
+      }
+      let n = 0;
+      onProgress(0, todo.length);
+      await pool(todo, Math.max(1, concurrency), async t => { t.r = await sealSlot(t.p, t.sec); onProgress(++n, todo.length); });
+      if (todo.length) {
+        await savePeople(todo.map(t => t.p));
+        await reconcile(todo.length === 1 ? '사람 추가' : `사람 추가 ${todo.length}명`);
+      }
+      for (const { i, p, r } of todo) out[i] = { person: view(p), code: r.code, invitation: invite(p, r.code), bits: r.bits, weak: r.weak };
+      return out;
+    }
+
+    // 여러 사람 막기 — 등급 열쇠는 한 번만 바꾸고 공개 저장소 커밋 하나
+    async function revokeMany(pids, { newToken } = {}) {
+      const state = await loadState();
+      const people = await loadPeople();
+      const list = [];
+      for (const pid of new Set(pids || [])) {
+        const p = people.find(x => x.id === pid);
+        if (!p) throw err('not-found', '그런 사람이 명단에 없어요.');
+        if (bundle?.pid === pid) throw err('self', '나 자신은 막을 수 없어요.');
+        list.push(p);
+      }
+      const act = list.filter(p => p.status === 'active');
+      if (!act.length) return { people: list.map(view), rotated: [], tokenExposed: false, recoveryCode: null };
+      const at = nowISO();
+      for (const p of act) { p.status = 'revoked'; p.revokedAt = at; }
+      const rotated = roles.keyed.filter(t => act.some(p => roles.tiersOf(p.role).includes(t)));
+      rotate(state, rotated);
+      const writer = act.some(p => roles.canWrite(p.role));
+      if (writer && newToken) state.token = newToken;
+      let recoveryCode = null;
+      if (act.some(p => roles.isAdmin(p.role))) recoveryCode = await rotateM(state, people);
+      else { await saveState(state); await savePeople(act); }
+      await reconcile(act.length === 1 ? '권한 회수(막기)' : `권한 회수(막기) ${act.length}명`);
+      return { people: list.map(view), rotated, tokenExposed: writer && !newToken, recoveryCode };
     }
     const invite = (p, code) => (code ? invitationText({ title: cfg.title, siteUrl: cfg.siteUrl, name: p.name, identifier: p.identifier, code, roleLabel: roles.display(p.role, p.labels) }) : null);
 
@@ -854,20 +994,13 @@ export function createAccess(config, opts = {}) {
         return (await loadPeople()).map(view).sort((a, b) => (a.issuedAt || '').localeCompare(b.issuedAt || ''));
       },
       // 사람 추가 → { person, code, invitation, bits, weak }. code 를 넣으면(가져온 인증번호) 그것을 쓴다
-      async addPerson({ name, identifier, role, labels = [], code, passphrase, acceptWeak = false }) {
-        const state = await loadState();
-        roles.get(role);
-        if (role === 'public') throw err('bad-role', '공개 등급은 로그인이 필요 없어요.');
-        if (!String(name ?? '').trim()) throw err('need-name', '이름을 넣어 주세요.');
-        if (!normIdentifier(identifier)) throw err('need-id', '아이디를 넣어 주세요.');
-        const lid = await lookupId(state.salt, identifier);
-        if ((await loadPeople()).some(p => p.lid === lid && p.status === 'active')) throw err('duplicate', '같은 아이디를 쓰는 사람이 이미 있어요. 다른 아이디(예: 이름+숫자, 전화번호)를 정해 주세요.');
-        const p = { id: uid(), name: String(name).trim().slice(0, 60), identifier: String(identifier).trim(), lid, role, labels: checkLabels(role, labels), status: 'active', issuedAt: nowISO(), revokedAt: null };
-        const r = await newSlotFor(p, { code, passphrase, acceptWeak });
-        await savePerson(p);
-        await reconcile(`사람 추가`);
-        return { person: view(p), code: r.code, invitation: invite(p, r.code), bits: r.bits, weak: r.weak };
+      async addPerson(row) {
+        return (await addPeople([row], { atomic: true }))[0];
       },
+      // 여러 사람 추가 (CSV 가져오기 등) → 넣은 순서대로 [{ person, code, invitation, bits, weak } | { error: { code, message }, input }]
+      //   잘못된 줄(같은 아이디·약한 번호·없는 역할…)은 error 로 돌려주고 나머지는 넣는다. atomic: true 면 첫 오류에서 아무것도 넣지 않고 멈춘다.
+      //   공개 저장소 커밋 하나. 시간은 거의 PBKDF2(사람마다 60만 회)라 onProgress(done, total) 로 보여 줄 것.
+      addPeople,
       // 코드 새로 발급 (예전 코드는 바로 못 씀). 막은 사람에게 쓰면 다시 허용
       async resetCode(pid, { code, acceptWeak = false } = {}) {
         const p = await findPerson(pid);
@@ -903,24 +1036,11 @@ export function createAccess(config, opts = {}) {
       // 막기: 자리를 지우고, 그 사람이 가졌던 등급 열쇠를 모두 바꾸고, 남은 사람 꾸러미와 항목 열쇠를 다시 감싼다 — 커밋 하나.
       // 쓰기 역할이었다면 토큰을 그 사람이 알고 있으므로 newToken 을 주거나, 뒤에 setToken 으로 바꾸고 예전 토큰을 GitHub 에서 지울 것
       async revoke(pid, { newToken } = {}) {
-        const state = await loadState();
-        const people = await loadPeople();
-        const p = people.find(x => x.id === pid);
-        if (!p) throw err('not-found', '그런 사람이 명단에 없어요.');
-        if (bundle?.pid === pid) throw err('self', '나 자신은 막을 수 없어요.');
-        if (p.status !== 'active') return { person: view(p), rotated: [], tokenExposed: false, recoveryCode: null };
-        p.status = 'revoked';
-        p.revokedAt = nowISO();
-        const rotated = roles.tiersOf(p.role);
-        rotate(state, rotated);
-        const writer = roles.canWrite(p.role);
-        if (writer && newToken) state.token = newToken;
-        let recoveryCode = null;
-        if (roles.isAdmin(p.role)) recoveryCode = await rotateM(state, people);
-        else { await saveState(state); await savePerson(p); }
-        await reconcile('권한 회수(막기)');
-        return { person: view(p), rotated, tokenExposed: writer && !newToken, recoveryCode };
+        const { people: [person], ...r } = await revokeMany([pid], { newToken });
+        return { person, ...r };
       },
+      // 여러 사람 막기 (예: 계약이 끝난 고객 목록) → { people, rotated, tokenExposed, recoveryCode }. 열쇠는 등급마다 한 번만 바꾼다
+      revokeMany,
       // 쓰기 토큰 바꾸기 (쓰기 역할 꾸러미를 모두 새 토큰으로)
       async setToken(newToken) {
         const state = await loadState();
@@ -980,6 +1100,7 @@ export function createAccess(config, opts = {}) {
     keyring: fetchKeyring,
     // 쓰기
     publish,
+    publishMany,
     publishFile,
     unpublish,
     restore,

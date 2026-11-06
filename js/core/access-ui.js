@@ -1,4 +1,4 @@
-// 등급 접속 화면 조각 (한국어). 사이트마다 그대로 가져다 쓴다. 틀(DOM)만 만들고, 모양은 ax- 로 시작하는 작은 CSS 하나.
+// 등급 접속 화면 조각 (한국어). 사이트마다 그대로 가져다 쓴다. 틀(DOM)만 만들고, 모양은 ax- 로 시작하는 작은 CSS 하나(access-ui.css).
 //   import { loginCard, invitationCard, peopleTable, confirmRevoke } from './core/access-ui.js';
 //
 // 규칙: 첫 화면은 공개 페이지. 로그인은 하나(아이디 + 코드) — 역할은 고르지 않고 자리(slot)가 정한다.
@@ -6,42 +6,15 @@
 
 import { invitationText } from './access.js';
 
-const CSS = `
-.ax-card{max-width:420px;margin:0 auto;padding:20px;border:1px solid color-mix(in srgb,CanvasText 18%,transparent);border-radius:14px;background:Canvas;color:CanvasText;font:15px/1.55 system-ui,sans-serif}
-.ax-card h2{font-size:18px;margin:0 0 12px}
-.ax-field{display:block;margin:10px 0}
-.ax-field span{display:block;font-size:13px;margin-bottom:4px;opacity:.85}
-.ax-field input,.ax-field select,.ax-msg{width:100%;box-sizing:border-box;padding:10px 12px;font:inherit;border:1px solid color-mix(in srgb,CanvasText 30%,transparent);border-radius:10px;background:Canvas;color:CanvasText}
-.ax-msg{min-height:220px;font-size:13px;white-space:pre-wrap}
-.ax-check{display:flex;gap:8px;align-items:flex-start;font-size:13px;margin:8px 0}
-.ax-btn{padding:10px 16px;font:inherit;border-radius:10px;border:1px solid color-mix(in srgb,CanvasText 30%,transparent);background:Canvas;color:CanvasText;cursor:pointer}
-.ax-btn.ax-main{background:#d9792b;border-color:#d9792b;color:#fff;font-weight:600}
-.ax-btn.ax-danger{background:#cf222e;border-color:#cf222e;color:#fff}
-.ax-btn:disabled{opacity:.6;cursor:wait}
-.ax-row{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
-.ax-note{font-size:12.5px;opacity:.8;margin:8px 0 0}
-.ax-err{color:#cf222e;font-size:13.5px;margin:8px 0 0;min-height:1em}
-.ax-ok{color:#1a7f37;font-size:13.5px;margin:8px 0 0}
-.ax-table{width:100%;border-collapse:collapse;font:14px/1.45 system-ui,sans-serif}
-.ax-table th,.ax-table td{padding:8px 6px;border-bottom:1px solid color-mix(in srgb,CanvasText 14%,transparent);text-align:left;vertical-align:top}
-.ax-table th{font-size:12.5px;opacity:.75;font-weight:600}
-.ax-revoked td{opacity:.55}
-.ax-tag{display:inline-block;padding:1px 8px;border-radius:99px;font-size:12px;border:1px solid currentColor}
-.ax-people{display:grid;gap:14px}
-.ax-add{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;align-items:end}
-.ax-scroll{overflow-x:auto}
-dialog.ax-dialog{max-width:460px;border:none;border-radius:14px;padding:0}
-dialog.ax-dialog::backdrop{background:rgba(0,0,0,.45)}
-.ax-print-card{display:none}
-@media print{html.ax-printing body>*:not(.ax-print-card){display:none!important}html.ax-printing .ax-print-card{display:block;width:85mm;border:1px solid #000;border-radius:4mm;padding:6mm;font:11pt/1.5 system-ui,sans-serif;color:#000}.ax-print-card b{font-size:14pt;letter-spacing:.06em}}
-`;
-
+// 모양은 access-ui.css (엄격한 CSP 에서도 되게 <style>·style="" 을 쓰지 않는다). 사이트가 link 로 넣지 않았으면 여기서 붙인다
+export const CSS_URL = new URL('./access-ui.css', import.meta.url).href;
 function styles() {
-  if (typeof document === 'undefined' || document.getElementById('ax-style')) return;
-  const s = document.createElement('style');
-  s.id = 'ax-style';
-  s.textContent = CSS;
-  document.head.append(s);
+  if (typeof document === 'undefined' || document.querySelector('link[data-ax-style],link[rel=stylesheet][href*="access-ui.css"]')) return;
+  const l = document.createElement('link');
+  l.rel = 'stylesheet';
+  l.href = CSS_URL;
+  l.dataset.axStyle = '';
+  document.head.append(l);
 }
 
 // 작은 DOM 도우미: h('div', { class: 'x', onclick }, '글', child)
@@ -144,7 +117,7 @@ export function printCard({ title, siteUrl, name, identifier, code, roleLabel })
     h('div', {}, `주소: ${siteUrl}`),
     h('div', {}, `아이디: ${identifier}`),
     h('div', {}, '접속 코드: ', h('b', {}, code)),
-    h('div', { style: 'font-size:9pt;margin-top:3mm' }, '본인만 쓰세요. 잃어버리면 관리자에게 새 코드를 받으세요 (예전 코드는 바로 못 쓰게 돼요).'),
+    h('div', { class: 'ax-print-small' }, '본인만 쓰세요. 잃어버리면 관리자에게 새 코드를 받으세요 (예전 코드는 바로 못 쓰게 돼요).'),
   );
   document.body.append(card);
   document.documentElement.classList.add('ax-printing');
@@ -265,13 +238,13 @@ export function peopleTable({ admin, access, onChange, confirm = confirmRevoke }
         h('td', {}, active ? sel : p.roleLabel),
         h('td', {}, h('span', { class: 'ax-tag' }, active ? (p.secret === 'passphrase' ? '사용 중 · 비밀문장' : '사용 중 · 코드') : '막음')),
         h('td', {}, fmtDate(p.issuedAt), p.revokedAt ? h('div', { class: 'ax-note' }, `막은 날 ${fmtDate(p.revokedAt)}`) : null),
-        h('td', {}, h('div', { class: 'ax-row', style: 'margin:0' }, bCode, active && !self ? bRole : null, active && !self ? bRevoke : null)),
+        h('td', {}, h('div', { class: 'ax-row ax-tight' }, bCode, active && !self ? bRole : null, active && !self ? bRevoke : null)),
       );
     }));
   }
 
   wrap.append(
-    h('div', { class: 'ax-card', style: 'max-width:none' },
+    h('div', { class: 'ax-card ax-wide' },
       h('h2', {}, '사람 추가'),
       h('div', { class: 'ax-add' },
         h('label', { class: 'ax-field' }, h('span', {}, '이름'), nName),

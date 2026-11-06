@@ -20,7 +20,7 @@
 </head>
 <body>
   <h1>js/core/access 시험 — 가짜 GitHub로 (등급 · 코드 · 막기 · 파일 저장소)</h1>
-  <p>역할마다 보이는 등급 · 물려받기 · 틀린 코드 · 막기(열쇠 바꾸기, 커밋 하나) · 쓰기 토큰 · 파일 · files-2 넘어가기 · keyring 에 아이디 없음 · 약한 비밀문장 · 예전 core 시험. 실제 GitHub에는 연결하지 않는다.</p>
+  <p>역할마다 보이는 등급 · 물려받기 · 틀린 코드 · 막기(열쇠 바꾸기, 커밋 하나) · 쓰기 토큰 · 파일 · files-2 넘어가기 · keyring 에 아이디 없음 · 약한 비밀문장 · 한꺼번에(publishMany · addPeople 300명 · revokeMany, 커밋 하나) · CSP(CSS 파일) · 예전 core 시험. 실제 GitHub에는 연결하지 않는다.</p>
   <p id="summary">시험 중…</p>
   <ol id="out"></ol>
   <pre id="log"></pre>
@@ -376,6 +376,145 @@ await test('내 코드를 비밀문장으로: 약한 것 거부 · 쓰기 역할
   eq((await device('o1z').login(P.o1.ident, 'blue-river-sings-7')).role, 'officer', '관리자 작업 뒤에도 비밀문장 유지');
 });
 
+// ---------- 9b. 한꺼번에: publishMany · addPeople · revokeMany ----------
+await test('publishMany: 여러 등급에 여러 글 + 휴지통 → 커밋 하나 · 409 면 다시 읽고 합쳐서 · 읽기 역할·높은 등급 거부', async () => {
+  DEV.p1b = device('p1-bulk');
+  await DEV.p1b.login(P.p1.ident, '우리 아이 웃음소리 2026');
+  DEV.t1b = device('t1-bulk0');
+  await DEV.t1b.login(P.t1.ident, P.t1.code);
+  const before = site.commitLog.length;
+  const items = [
+    ...[1, 2, 3].map(i => ({ tier: 'public', data: { title: `묶음 공개 ${i}` } })),
+    ...[1, 2, 3, 4, 5].map(i => ({ tier: 'parent', data: { title: `묶음 학부모 ${i}` } })),
+    ...[1, 2, 3, 4].map(i => ({ tier: 'teacher', id: `bulk-t${i}`, data: { title: `묶음 선생님 ${i}` } })),
+    { tier: 'teacher', id: pub.talent, trash: true },
+    { tier: 'teacher', id: 'no-such-item', trash: true },
+  ];
+  const r = await AX.publishMany(items);
+  eq(site.commitLog.length, before + 1, '공개 저장소 커밋 하나');
+  eq(site.commitLog.at(-1).paths.slice().sort(), ['access/parent/index.json', 'access/public/index.json', 'access/teacher/index.json'], '등급마다 목록 파일 하나');
+  eq(r.length, items.length, '결과 수');
+  eq(r.slice(8, 12).map(x => x.id), ['bulk-t1', 'bulk-t2', 'bulk-t3', 'bulk-t4'], '정한 id 그대로');
+  eq(r.slice(-2).map(x => [x.trash, x.done]), [[true, true], [true, false]], '휴지통 · 없는 것은 done:false');
+  eq(titles(await DEV.p1b.list('parent')).filter(t => t.startsWith('묶음')), [1, 2, 3, 4, 5].map(i => `묶음 학부모 ${i}`), '학부모가 봄');
+  const tt = titles(await DEV.t1b.list('teacher'));
+  assert(tt.includes('묶음 선생님 4') && !tt.includes('달란트 표'), '선생님 글 · 휴지통으로 간 것은 빠짐');
+  assert(!titles(await DEV.p1b.listAll()).some(t => t.startsWith('묶음 선생님')), '학부모는 선생님 글 못 봄');
+  // 고치기 + 되살리기 + 동시에 누가 먼저 올림(409) → 다시 읽고 합침
+  const c0 = site.conflicts;
+  site.beforeCommit = async () => { await DEV.o1.publish({ tier: 'teacher', data: { title: '그사이 임원 글' } }); };
+  await AX.publishMany([{ tier: 'teacher', id: 'bulk-t1', data: { title: '묶음 선생님 1 고침' } }, { tier: 'teacher', id: pub.talent, restore: true }]);
+  assert(site.conflicts > c0, '409 가 났음');
+  const t2 = titles(await DEV.t1b.list('teacher'));
+  assert(t2.includes('그사이 임원 글') && t2.includes('묶음 선생님 1 고침') && t2.includes('달란트 표') && !t2.includes('묶음 선생님 1'), `다른 사람 글을 덮어쓰지 않고 합침: ${t2}`);
+  await rejects(() => DEV.p1b.publishMany([{ tier: 'parent', data: {} }]), 'read-only', '학부모는 못 올림');
+  await rejects(() => DEV.o1.publishMany([{ tier: 'parent', data: {} }, { tier: 'admin', data: {} }]), 'no-access', '임원이 관리자 등급');
+  await rejects(() => AX.publishMany([{ tier: 'parent', id: 'x1', data: {} }, { tier: 'parent', id: 'x1', data: {} }]), 'bad-id', '같은 항목 두 번');
+  await rejects(() => AX.publishMany([{ tier: 'parent', id: f1.id, data: {} }]), 'bad-id', '파일 항목');
+  eq(await AX.publishMany([]), [], '빈 목록은 아무것도 안 함');
+});
+
+await test('addPeople: 여러 줄 → 커밋 하나, 잘못된 줄은 error 로 돌려주고 나머지는 넣음 · atomic · revokeMany', async () => {
+  const n0 = (await admin.people()).length;
+  const before = site.commitLog.length;
+  const rows = [
+    { name: '묶음학부모', identifier: 'bulk-parent-01', role: 'parent' },
+    { name: '또김', identifier: '010 1111 2222', role: 'parent' }, // 이미 있는 아이디
+    { name: '약한번호', identifier: 'cust-weak', role: 'parent', code: '123456' }, // 40비트 미만
+    { name: '묶음선생님', identifier: 'bulk-teacher-01', role: 'teacher', code: 'Q8ZK-T4NW-77PA-XM3R' }, // 가져온 번호
+    { name: '겹침', identifier: 'BULK-PARENT-01', role: 'parent' }, // 같은 묶음 안에서 겹침
+    { name: '없는역할', identifier: 'bulk-x', role: 'nobody' },
+  ];
+  const r = await admin.addPeople(rows);
+  eq(site.commitLog.length, before + 1, '공개 저장소 커밋 하나');
+  eq(r.map(x => x.error?.code || 'ok'), ['ok', 'duplicate', 'weak-code', 'ok', 'duplicate', 'bad-role'], '줄마다 결과');
+  eq((await admin.people()).length, n0 + 2, '두 명만 들어감');
+  assert(r[0].invitation.includes(r[0].code) && /^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$/.test(r[0].code), '자동 코드 + 안내문');
+  eq([r[3].code, r[3].weak, r[3].person.roleLabel], ['Q8ZK-T4NW-77PA-XM3R', false, '선생님'], '가져온 번호');
+  eq((await device('bulk-p').login('bulk-parent-01', r[0].code)).role, 'parent', '새 학부모 로그인');
+  eq((await device('bulk-t').login('bulk-teacher-01', 'q8zk t4nw 77pa xm3r')).tiers, ['public', 'parent', 'teacher'], '새 선생님 로그인');
+  // atomic: 하나라도 틀리면 아무것도 넣지 않음
+  const c1 = site.commitLog.length;
+  await rejects(() => admin.addPeople([{ name: '좋음', identifier: 'bulk-ok-2', role: 'parent' }, rows[2]], { atomic: true }), 'weak-code', 'atomic');
+  eq([site.commitLog.length, (await admin.people()).length], [c1, n0 + 2], 'atomic 은 아무것도 안 넣음');
+  // revokeMany: 두 사람을 한 번에 막기 → 열쇠는 등급마다 한 번, 커밋 하나
+  const kv0 = siteJSON('access/parent/index.json').kv;
+  const c2 = site.commitLog.length;
+  const v = await admin.revokeMany([r[0].person.id, r[3].person.id]);
+  eq(site.commitLog.length, c2 + 1, '막기 커밋 하나');
+  eq([v.rotated, v.tokenExposed, v.people.map(p => p.status)], [['parent', 'teacher'], false, ['revoked', 'revoked']], '바뀐 등급 · 상태');
+  eq(siteJSON('access/parent/index.json').kv, kv0 + 1, '학부모 열쇠 판은 한 번만 올라감');
+  await rejects(() => device('bulk-p2').login('bulk-parent-01', r[0].code), 'bad-login', '막힌 학부모');
+  eq((await device('t1-bulk').login(P.t1.ident, P.t1.code)).role, 'teacher', '남은 선생님은 그대로');
+  assert(titles(await DEV.p1b.list('parent')).includes('묶음 학부모 1'), '열려 있던 학부모 기기도 새 열쇠로 봄');
+  eq((await admin.revokeMany([r[0].person.id])).rotated, [], '이미 막은 사람은 그대로 (열쇠 안 바꿈)');
+  await rejects(() => admin.revokeMany(['nobody']), 'not-found', '없는 사람');
+});
+
+await test('큰 묶음: 300명 addPeople · 300개 publishMany · 100명 revokeMany → 각각 공개 저장소 커밋 하나, API 요청 수는 사람 수와 상관없음', async () => {
+  // 따로 만든 사이트 (PBKDF2 를 줄여서 빨리). 진짜 GitHubBackend 의 요청 수로 센다: commit = 커밋 읽기 1 + 파일마다 blob 1 + tree·commit·ref 3
+  const g2 = new FakeGitHub({ owner: 'bulk', tokens: ['core2', 'pub2'], creators: ['pub2'] });
+  const data2 = g2.repo('bulk-data', { isPublic: false });
+  const site2 = g2.repo('bulk.github.io', { isPublic: true });
+  site2.files.set('index.html', { sha: 'sha0', bytes: C.utf8('<!doctype html>') });
+  site2.addCommit('init', ['index.html']);
+  let calls = 0;
+  const COST = { head: () => 1, get: () => 1, put: () => 1, commit: files => 4 + files.length, createRepo: () => 2, check: () => 1, tree: () => 1 };
+  const counted = c => new Proxy(c, { get: (t, k) => (typeof t[k] === 'function' && COST[k] ? (...a) => { calls += COST[k](...a); return t[k](...a); } : t[k]) });
+  const CFG2 = { ...CFG, site: 'bulk', owner: 'bulk', repo: 'bulk.github.io', siteUrl: 'https://bulk.github.io/', iter: 2000 };
+  const mk = tag => { const kvName = `ax-test-${RUN}-${tag}`; dbs.push(kvName); return A.createAccess(CFG2, { reader: g2.reader(CFG2.repo), backendFor: (token, r) => counted(g2.client(token, r.repo)), kvName }); };
+  const coreName = `ax-core-${RUN}-bulk`;
+  dbs.push(coreName);
+  const core2 = createCore({ dbName: coreName, backend: token => data2.client(token), autoSync: false, siteUrl: CFG2.siteUrl, user: 'bulk' });
+  await core2.setup('core2', CORE_PW);
+  const ax = mk('bulk-admin');
+  const { admin: ad } = await ax.setup(core2, { token: 'pub2', name: '묶음관리', identifier: 'bulk-admin' });
+  await core2.sync();
+  const N = 300;
+  const rows = Array.from({ length: N }, (_, i) => ({ name: `고객${i + 1}`, identifier: `CUST-${String(i + 1).padStart(5, '0')}`, role: i % 3 ? 'parent' : 'teacher', code: `48213958271${String(i).padStart(6, '0')}` }));
+  rows.push({ name: '겹침', identifier: 'cust-00001', role: 'parent' });
+  const c0 = site2.commitLog.length;
+  const d0 = data2.commitLog.length;
+  calls = 0;
+  let prog = 0;
+  const t0 = performance.now();
+  const r = await ad.addPeople(rows, { onProgress: d => { prog = d; } });
+  const ms = Math.round(performance.now() - t0);
+  const siteCalls = calls;
+  eq(site2.commitLog.length, c0 + 1, `${N}명 → 공개 저장소 커밋 하나`);
+  eq([r.filter(x => x.person).length, r.at(-1).error?.code, prog], [N, 'duplicate', N], '300명 들어감, 겹친 줄은 error, 진행 표시');
+  eq(Object.keys(JSON.parse(C.unutf8(site2.files.get('keyring.json').bytes)).slots).length, N + 1, 'keyring 자리 301개');
+  assert(siteCalls <= 20, `공개 저장소 API 요청 ${siteCalls}번 (사람 수와 상관없이 20번 이하)`);
+  const log0 = data2.log.length;
+  await core2.sync();
+  const dataCommits = data2.commitLog.length - d0;
+  const dataCalls = data2.log.length - log0;
+  assert(dataCommits >= 1 && dataCommits <= 17, `데이터 저장소 커밋 ${dataCommits}개 (조각 16개 + state 이하)`);
+  for (const i of [0, 149, 299]) eq((await mk(`bulk-${i}`).login(rows[i].identifier, rows[i].code)).role, rows[i].role, `${i + 1}번째 로그인`);
+  // 300개 글을 두 등급에 → 커밋 하나
+  const c1 = site2.commitLog.length;
+  calls = 0;
+  const items = Array.from({ length: N }, (_, i) => ({ tier: i % 2 ? 'parent' : 'teacher', id: `seed-${i}`, data: { title: `가져온 글 ${i}` } }));
+  await ax.publishMany(items);
+  const pubCalls = calls;
+  eq(site2.commitLog.length, c1 + 1, `${N}개 글 → 커밋 하나`);
+  assert(pubCalls <= 12, `publishMany API 요청 ${pubCalls}번`);
+  const reader = mk('bulk-reader');
+  await reader.login(rows[0].identifier, rows[0].code); // 선생님
+  eq((await reader.list('parent')).length + (await reader.list('teacher')).length, N, '300개 모두 열림');
+  // 100명 막기 → 커밋 하나
+  const c2 = site2.commitLog.length;
+  calls = 0;
+  const v = await ad.revokeMany(r.slice(0, 100).map(x => x.person.id));
+  eq(site2.commitLog.length, c2 + 1, '100명 막기 → 커밋 하나');
+  eq(v.rotated, ['parent', 'teacher'], '등급마다 한 번만 바꿈');
+  eq(JSON.parse(C.unutf8(site2.files.get('access/parent/index.json').bytes)).kv, 2, '열쇠 판 2 (100번 바뀌지 않음)');
+  await rejects(() => mk('bulk-gone').login(rows[5].identifier, rows[5].code), 'bad-login', '막힌 고객');
+  eq((await mk('bulk-stay').login(rows[200].identifier, rows[200].code)).role, rows[200].role, '남은 고객');
+  document.getElementById('log').textContent += `큰 묶음: ${N}명 addPeople ${ms}ms (PBKDF2 ${CFG2.iter}회) · 공개 저장소 API ${siteCalls}번 · 데이터 저장소 커밋 ${dataCommits}개(요청 ${dataCalls}번) · publishMany ${N}개 API ${pubCalls}번 · revokeMany 100명 API ${calls}번\n`;
+  await ax.logout();
+});
+
 // ---------- 10. 관리자: 같은 로그인으로 데이터 저장소 열기 · 복구 ----------
 await test('관리자: 새 기기에서 아이디+코드 하나로 로그인 → 데이터 저장소(core)까지 열림', async () => {
   await CA.sync();
@@ -439,6 +578,12 @@ await test('UI: 로그인 카드(아이디+코드, 역할 고르기 없음) · �
   const table = UI.peopleTable({ admin, access: AX });
   ui.append(table);
   await table.ready;
+  // 엄격한 CSP(style-src 'self'): <style> 도 style="" 도 넣지 않고 access-ui.css 를 link 로
+  assert(!document.querySelector('style#ax-style') && !ui.querySelector('[style]'), '안에 넣은 style 없음');
+  const link = document.querySelector('link[data-ax-style]');
+  assert(link && link.href === UI.CSS_URL && /\/js\/core\/access-ui\.css$/.test(link.href), 'access-ui.css 를 link 로');
+  if (!link.sheet) await new Promise(res => { link.addEventListener('load', res); setTimeout(res, 3000); });
+  eq([getComputedStyle(card).borderRadius, getComputedStyle(table.querySelector('.ax-card')).maxWidth], ['14px', 'none'], 'CSS 파일의 모양이 먹음');
   const rows = table.querySelectorAll('tbody tr');
   eq(rows.length, (await admin.people()).length, '명단 줄 수');
   assert(table.textContent.includes('임원') && table.textContent.includes('막음') && table.textContent.includes('마지막 접속'), '역할 · 막음 · 접속 기록 없음 안내');

@@ -398,10 +398,11 @@ async function accessView(ctx, body) {
   body.querySelector('#auto-fam')?.addEventListener('click', async () => {
     if (!(await confirmBox(`가족 ${unassigned.length}개의 코드를 만들까요?\n${unassigned.map(f => f.name).join(', ')}\n\n코드는 다 만든 뒤 한 번에 보여 드려요(그때 복사·인쇄).`))) return;
     await work('가족 코드를 만드는 중…', async bar => {
-      const out = [];
-      for (let i = 0; i < unassigned.length; i++) { out.push(await ctx.pub.addFamily(unassigned[i])); bar((i + 1) / unassigned.length); }
+      const res = await ctx.pub.addFamilies(unassigned, { onProgress: (d, n) => bar(n ? (d / n) * 0.9 : 0.9) }); // 공개 저장소 커밋 하나
+      const bad = res.filter(r => r.error);
+      if (bad.length) toast(`${bad.length}개는 만들지 못했어요: ${bad.map(r => `${r.input.name} (${r.error.message})`).join(', ')}`);
       await ctx.pub.publish();
-      return out;
+      return res.filter(r => r.person);
     });
   });
   body.querySelector('#acx-ok').onclick = async e => {
