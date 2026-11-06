@@ -1,8 +1,8 @@
 // 관리자 화면 — 임원(관리자)만. 관리자 비밀번호로 연 core(비공개 저장소)의 모든 내용을 고친다.
 // 연락처(부모님 이름·전화·비고·예금주·문의 연락처)는 여기서만 보인다.
 import { esc, textHtml, icon, toast, toastErr, modal, closeModal, confirmBox, busy, dateKo, dateDot, size, timeAgo, download, ymd, copyText } from './ui.js';
-import { ROLES } from './core/access.js';
-import { inviteMessage } from './publish.js';
+import { ACCESS_CONFIG } from './access-config.js';
+import { printCard } from './core/access-ui.js';
 import { applyPlan, ids } from './plan.js';
 import { sortMembers, SITE_PRIVATE } from './bundle.js';
 import { PDF_WARN, PDF_MAX, repoName, toEntry } from './media.js';
@@ -154,62 +154,47 @@ function bindLinks(root) {
   });
 }
 
-// ---------- 들어가기 (연결·잠금) ----------
-function connectScreen() {
+// ---------- 처음 설정 · 관리자 코드 복구 (로그인은 로그인 화면 하나에서) ----------
+function setupScreen() {
+  return `<div class="login" style="max-width:560px">
+    <img class="logo" src="assets/icon.svg" alt=""><h1>처음 설정</h1>
+    <p class="muted">합창단에서 딱 한 번. 비어 있는 비공개 저장소 <b>jayangchoir/jayangchoir-data</b> 와 공개 사이트 저장소를 준비해요. 자세한 순서는 README 의 "처음 한 번".</p>
+    <form id="f-setup" class="card" style="text-align:left">
+      <label class="f"><span>GitHub 토큰</span><input id="s-token" type="password" autocomplete="off" required></label>
+      <label class="f"><span>관리자 데이터 비밀번호 (8자 이상, 비상용 — 관리자 코드를 모두 잃었을 때만 씀)</span><input id="s-pw" type="password" autocomplete="new-password" required minlength="8"></label>
+      <label class="f"><span>한 번 더</span><input id="s-pw2" type="password" autocomplete="new-password" required></label>
+      <label class="f"><span>내 이름</span><input id="s-name" required placeholder="예: 김총무"></label>
+      <label class="f"><span>관리자 로그인 이름</span><input id="s-id" required value="choir-admin"></label>
+      <button class="btn primary block">처음 설정</button><div class="msg"></div></form>
+    <p><a href="#/">← 첫 화면</a></p></div>`;
+}
+
+function lostScreen() {
   return `<div class="login" style="max-width:560px">
     <img class="logo" src="assets/icon.svg" alt=""><h1>관리자</h1>
-    <p class="muted">합창단 임원만 쓰는 곳이에요.</p>
-    <div class="card" style="text-align:left">
-      <h3>이미 연결된 기기가 있으면</h3>
-      <p class="small">그 기기의 관리자 화면 → 설정 → <b>새 기기 연결(QR)</b> 을 이 휴대폰 카메라로 찍으세요. 그다음 관리자 비밀번호를 넣으면 돼요.</p>
-    </div>
-    <details class="card" style="text-align:left"><summary><b>GitHub 토큰으로 연결</b> (모든 기기를 잃었을 때)</summary>
-      <form id="f-conn" style="margin-top:12px">
-        <label class="f"><span>GitHub 토큰</span><input id="c-token" type="password" autocomplete="off" required></label>
-        <label class="f"><span>관리자 비밀번호</span><input id="c-pw" type="password" autocomplete="current-password" required></label>
-        <label class="f"><span>내 이름 (고친 사람으로 남아요)</span><input id="c-name" required></label>
-        <button class="btn primary block">연결</button><div class="msg"></div></form></details>
-    <details class="card" style="text-align:left"><summary><b>처음 설정</b> (합창단에서 딱 한 번)</summary>
-      <form id="f-setup" style="margin-top:12px">
-        <p class="small">비어 있는 비공개 저장소 <b>jayangchoir/jayangchoir-data</b> 에 암호화된 관리자 데이터를 만들어요. 자세한 순서는 README 의 "처음 한 번" 을 보세요.</p>
-        <label class="f"><span>GitHub 토큰</span><input id="s-token" type="password" autocomplete="off" required></label>
-        <label class="f"><span>관리자 비밀번호 (8자 이상, 임원끼리만)</span><input id="s-pw" type="password" autocomplete="new-password" required minlength="8"></label>
-        <label class="f"><span>한 번 더</span><input id="s-pw2" type="password" autocomplete="new-password" required></label>
-        <label class="f"><span>내 이름</span><input id="s-name" required></label>
-        <button class="btn primary block">처음 설정</button><div class="msg"></div></form></details>
-    <details class="card" style="text-align:left"><summary><b>복구 코드로 열기</b> (관리자 비밀번호를 모두 잊었을 때)</summary>
+    <div class="card" style="text-align:left"><p>관리자도 <b>로그인 화면</b>에서 관리자 이름과 관리자 코드로 들어와요.</p><a class="btn primary" href="#/login">${icon('lock')} 로그인</a></div>
+    <details class="card" style="text-align:left"><summary><b>관리자 코드를 잃었어요</b></summary>
+      <form id="f-lost" style="margin-top:12px">
+        <p class="small">관리자 데이터 비밀번호와 <b>명단 복구 코드</b>(처음 설정 때 받은 종이)가 있으면 새 관리자 코드를 만들 수 있어요.</p>
+        <label class="f"><span>관리자 데이터 비밀번호</span><input id="l-pw" type="password" required></label>
+        <label class="f"><span>명단 복구 코드</span><input id="l-rc" autocomplete="off" required placeholder="ABCD-EFGH-…"></label>
+        <label class="f"><span>GitHub 토큰 (이 기기를 처음 쓰면)</span><input id="l-token" type="password" autocomplete="off"></label>
+        <button class="btn primary block">새 관리자 코드 만들기</button><div class="msg"></div></form></details>
+    <details class="card" style="text-align:left"><summary>관리자 데이터 비밀번호도 잊었어요</summary>
       <form id="f-rec0" style="margin-top:12px">
-        <label class="f"><span>복구 코드</span><input id="r0-code" autocomplete="off" required placeholder="ABCD-EFGH-…"></label>
-        <label class="f"><span>새 관리자 비밀번호</span><input id="r0-pw" type="password" autocomplete="new-password" required minlength="8"></label>
+        <p class="small">데이터 복구 코드(처음 설정 때 받은 다른 종이)로 새 비밀번호를 정해요.</p>
+        <label class="f"><span>데이터 복구 코드</span><input id="r0-code" autocomplete="off" required></label>
+        <label class="f"><span>새 관리자 데이터 비밀번호</span><input id="r0-pw" type="password" autocomplete="new-password" required minlength="8"></label>
         <label class="f"><span>GitHub 토큰</span><input id="r0-token" type="password" autocomplete="off" required></label>
-        <button class="btn primary block">복구</button><div class="msg"></div></form></details>
-    <p><a href="#/">← 학부모 화면</a></p></div>`;
+        <button class="btn primary block">새 비밀번호로</button><div class="msg"></div></form></details>
+    <p><a href="#/">← 첫 화면</a></p></div>`;
 }
 
-function unlockScreen(ctx) {
-  const s = ctx.core.status();
-  return `<div class="login">
-    <img class="logo" src="assets/icon.svg" alt=""><h1>관리자</h1>
-    ${s.errorCode === 'password-changed' ? '<div class="warn">다른 기기에서 관리자 비밀번호가 바뀌었어요. 새 비밀번호로 열어 주세요.</div>' : ''}
-    <form id="f-unlock" class="card" style="text-align:left">
-      <input type="text" name="username" value="관리자" autocomplete="username" hidden>
-      <label class="f"><span>관리자 비밀번호</span><input id="u-pw" type="password" autocomplete="current-password" required></label>
-      <label class="check"><input id="u-rem" type="checkbox"> 이 기기에서 30일 동안 열어 두기 (내 휴대폰만)</label>
-      <button class="btn primary block">열기</button><div class="msg"></div>
-    </form>
-    <details class="card" style="text-align:left"><summary>비밀번호를 잊었어요</summary>
-      <form id="f-rec" style="margin-top:12px">
-        <label class="f"><span>복구 코드</span><input id="r-code" autocomplete="off" required></label>
-        <label class="f"><span>새 관리자 비밀번호</span><input id="r-pw" type="password" autocomplete="new-password" required minlength="8"></label>
-        <button class="btn primary block">복구하고 열기</button><div class="msg"></div></form></details>
-    <p><a href="#/">← 학부모 화면</a></p></div>`;
-}
-
-async function showRecovery(code) {
-  await modal(`<div><h2>복구 코드</h2>
-    <p>관리자 비밀번호를 모두 잊었을 때 쓰는 <b>유일한</b> 방법이에요. 종이에 적어 인수인계 봉투에 넣어 두세요. 다시 볼 수 없어요.</p>
-    <div class="code-box">${esc(code)}</div>
-    <label class="check" style="margin-top:14px"><input type="checkbox" id="rc-ok"> 적어 두었어요</label>
+async function showCodes(list) {
+  await modal(`<div><h2>꼭 적어 두세요</h2>
+    <p class="small">아래는 <b>지금 한 번만</b> 보여요. 종이에 적어 인수인계 봉투에 넣어 두세요.</p>
+    ${list.map(([label, code, note]) => `<p style="margin:12px 0 4px"><b>${esc(label)}</b> <span class="tiny muted">${esc(note || '')}</span></p><div class="code-box">${esc(code)}</div>`).join('')}
+    <label class="check" style="margin-top:14px"><input type="checkbox" id="rc-ok"> 모두 적어 두었어요</label>
     <div class="row end"><button class="btn primary" id="rc-close" disabled>닫기</button></div></div>`, {
     onOpen: (b, close) => {
       b.querySelector('#rc-ok').onchange = e => { b.querySelector('#rc-close').disabled = !e.target.checked; };
@@ -232,29 +217,55 @@ function bindGate(ctx, view) {
     };
   };
   const v = id => view.querySelector(id).value;
-  form('#f-unlock', async () => { await ctx.core.open(v('#u-pw'), { remember: view.querySelector('#u-rem').checked }); afterOpen(ctx); });
-  form('#f-conn', async () => { await ctx.core.connectWithToken(v('#c-token').trim(), v('#c-pw')); await ctx.core.setUser(v('#c-name')); afterOpen(ctx); });
   form('#f-setup', async () => {
     if (v('#s-pw') !== v('#s-pw2')) throw new Error('두 비밀번호가 달라요.');
-    const code = await ctx.core.setup(v('#s-token').trim(), v('#s-pw'), { user: v('#s-name') });
-    await showRecovery(code);
-    afterOpen(ctx, '#/admin');
+    const token = v('#s-token').trim();
+    const dataCode = await ctx.core.setup(token, v('#s-pw'), { user: v('#s-name') });
+    const r = await ctx.access.setup(ctx.core, { token, name: v('#s-name'), identifier: v('#s-id').trim() });
+    await showCodes([
+      ['관리자 로그인', `${v('#s-id').trim()} / ${r.code}`, '로그인 화면에 넣는 이름과 코드'],
+      ['명단 복구 코드', r.recoveryCode, '관리자 코드를 잃었을 때'],
+      ['데이터 복구 코드', dataCode, '관리자 데이터 비밀번호를 잊었을 때'],
+    ]);
+    await ctx.session.openAdminIfNeeded();
+    ctx.uploads.resume();
+    ctx.go('#/admin');
   });
-  form('#f-rec', async () => { await ctx.core.recover(v('#r-code'), v('#r-pw')); toast('새 비밀번호로 열었어요. 다른 기기도 새 비밀번호로 열어 주세요.'); afterOpen(ctx); });
-  form('#f-rec0', async () => { await ctx.core.recover(v('#r0-code'), v('#r0-pw'), v('#r0-token').trim()); afterOpen(ctx); });
-}
-async function afterOpen(ctx, to) {
-  ctx.uploads.resume();
-  await ctx.session.refreshAdmin();
-  if (to) ctx.go(to); else ctx.render();
+  form('#f-lost', async () => {
+    const token = v('#l-token').trim();
+    if (!ctx.core.status().connected) {
+      if (!token) throw new Error('이 기기는 처음이라 GitHub 토큰이 필요해요.');
+      await ctx.core.connectWithToken(token, v('#l-pw'));
+    } else if (!ctx.core.status().open) await ctx.core.open(v('#l-pw'));
+    const adm = await ctx.access.recoverAdmin(ctx.core, v('#l-rc'));
+    const me = (await adm.people()).find(p => p.role === 'admin' && p.status === 'active') || (await adm.people()).find(p => p.role === 'admin');
+    if (!me) throw new Error('명단에 관리자가 없어요.');
+    const r = await adm.resetCode(me.id);
+    await showCodes([['새 관리자 코드', `${me.identifier} / ${r.code}`, '예전 관리자 코드는 이제 못 써요']]);
+    await ctx.session.login(me.identifier, r.code, { remember: true });
+    ctx.uploads.resume();
+    ctx.go('#/admin');
+  });
+  form('#f-rec0', async () => {
+    await ctx.core.recover(v('#r0-code'), v('#r0-pw'), v('#r0-token').trim());
+    toast('새 관리자 데이터 비밀번호로 열었어요. 이제 "관리자 코드를 잃었어요"로 새 관리자 코드를 만드세요.');
+    await ctx.core.lock();
+    ctx.render();
+  });
 }
 
 // ---------- 본체 ----------
 export async function adminView(ctx, view, r) {
   const s = ctx.core.status();
   document.title = '관리자 · 자양교회 어린이 합창단';
-  if (!s.connected) { view.innerHTML = connectScreen(); bindGate(ctx, view); return; }
-  if (!s.open) { view.innerHTML = unlockScreen(ctx); bindGate(ctx, view); setTimeout(() => view.querySelector('#u-pw')?.focus(), 50); return; }
+  void s;
+  if (ctx.session.role !== 'admin' || !s.open || !ctx.session.admin) {
+    let setUp = true;
+    try { setUp = !!(await ctx.access.keyring()); } catch {}
+    view.innerHTML = setUp ? lostScreen() : setupScreen();
+    bindGate(ctx, view);
+    return;
+  }
   const tab = r[0] || '';
   const tabs = `<nav class="admin-tabs" aria-label="관리자 메뉴">${TABS.map(([k, l]) => `<a href="#/admin${k ? `/${k}` : ''}" class="${tab === k ? 'on' : ''}">${l}</a>`).join('')}</nav>`;
   view.innerHTML = `${tabs}<div id="pub-bar"></div><div id="adm"></div>
@@ -284,7 +295,7 @@ async function paintPublishBar(ctx, el) {
   if (!el?.isConnected) return;
   let st;
   try { st = await ctx.pub.state(); } catch (e) { el.innerHTML = ''; return; }
-  if (!st.configured) {
+  if (!st.publishedAt) {
     el.innerHTML = `<div class="publish-bar"><span class="grow">아직 학부모 화면을 반영하지 않았어요. 가족 코드를 만들고 반영하면 열려요.</span><a class="btn small primary" href="#/admin/access">가족 코드</a></div>`;
     return;
   }
@@ -309,15 +320,17 @@ async function doPublish(ctx, btn) {
 // ---------- 대시보드 ----------
 async function dashboard(ctx, body) {
   const st = await ctx.pub.state();
+  const people = await ctx.session.admin.people();
+  const act = people.filter(p => p.status === 'active');
   const usage = ctx.media.usage();
   const total = usage.reduce((n, u) => n + u.bytes, 0);
   const counts = ['notices', 'events', 'songs', 'videos', 'albums', 'members'].map(c => [c, ctx.core.collection(c).list().length]);
   body.innerHTML = `
-    <h1>관리자</h1><p class="muted small">${esc(ctx.core.status().user || '')}님 · ${esc(ctx.core.status().repo)}</p>
+    <h1>관리자</h1><p class="muted small">${esc(ctx.session.person?.name || '')}님 · ${esc(ctx.core.status().repo)}</p>
     ${tokenWarnHtml(st)}
     <div class="card">
       <h2>학부모·스탭 화면</h2>
-      <p class="small">가족 코드 <b>${st.families}</b>개 · 스탭 코드 <b>${st.staff}</b>개${st.revoked ? ` · 회수 ${st.revoked}개` : ''} · 마지막 반영 ${st.publishedAt ? `${esc(timeAgo(st.publishedAt))} (${esc(st.publishedBy)})` : '아직'}</p>
+      <p class="small">가족 코드 <b>${act.filter(p => p.role === 'parent').length}</b>개 · 스탭 <b>${act.filter(p => p.role === 'staff').length}</b>명 · 관리자 ${act.filter(p => p.role === 'admin').length}명${people.length > act.length ? ` · 회수 ${people.length - act.length}` : ''} · 마지막 반영 ${st.publishedAt ? `${esc(timeAgo(st.publishedAt))} (${esc(st.publishedBy)})` : '아직'}</p>
       <div class="row"><button class="btn primary" data-publish>${icon('refresh')} 학부모 화면에 반영</button><a class="btn soft" href="#/home">학부모 화면 보기</a><a class="btn soft" href="#/staff">스탭 화면 보기</a><a class="btn ghost" href="#/admin/access">권한·코드 관리</a></div>
     </div>
     <div class="grid2">
@@ -325,122 +338,153 @@ async function dashboard(ctx, body) {
         <p class="help" style="margin-top:12px"><a href="#/admin/trash">휴지통</a> · <a href="#/admin/import">노션에서 가져오기</a> · <a href="#/admin/public">공개 페이지</a></p></div>
       <div class="card"><h3>사진·악보 저장 공간</h3>
         ${usage.length ? usage.map(u => `<div style="margin-bottom:10px"><div class="row between small"><b>${esc(u.name)}</b><span>${size(u.bytes)} / ${size(u.limit)} · ${u.count}개</span></div><div class="bar"><i style="width:${Math.max(1, u.pct)}%"></i></div></div>`).join('')
-        + `<p class="help">모두 ${size(total)}. 저장소 하나가 ${size(ctx.media.limit)} 가 되면 다음 저장소(${esc(repoName(usage.length + 1))})를 저절로 만들어요. (스탭 회의자료 첨부는 여기 세지 않아요)</p>`
-    : '<p class="small muted">아직 올린 사진·악보가 없어요. 처음 반영할 때 choir-photos-1 저장소를 만들어요.</p>'}</div>
+        + `<p class="help">모두 ${size(total)}. 저장소 하나가 ${size(ctx.media.limit)} 가 되면 다음 저장소(${esc(repoName(usage.length + 1))})를 저절로 만들어요. 스탭 회의자료 첨부는 따로 choir-files-N 에 있어요.</p>`
+    : '<p class="small muted">아직 올린 사진·악보가 없어요. 처음 올릴 때 choir-photos-1 저장소를 만들어요.</p>'}</div>
     </div>`;
   body.querySelector('[data-publish]')?.addEventListener('click', e => doPublish(ctx, e.currentTarget));
 }
 
-const tokenWarnHtml = st => (st.tokenWarn ? `<div class="err"><b>GitHub 토큰을 바꿔 주세요.</b> 스탭이었던 ${esc(st.tokenWarn.name)} 님이 쓰기용 토큰을 받아 갔을 수 있어요. 열쇠(K)는 이미 바꿔서 새 내용은 못 보지만, 토큰이 있으면 저장소에 쓸 수는 있어요.
+const tokenWarnHtml = st => (st.tokenWarn ? `<div class="err"><b>GitHub 토큰을 바꿔 주세요.</b> 스탭이었던 ${esc(st.tokenWarn.name)} 님이 쓰기용 토큰을 받아 갔을 수 있어요. 열쇠는 이미 바꿔서 새 내용은 못 보지만, 토큰이 있으면 저장소에 쓸 수는 있어요.
   <a href="#/admin/settings">설정 → GitHub 토큰 바꾸기</a> 를 하고 예전 토큰은 GitHub 에서 지우세요.</div>` : '');
 
-// ---------- 권한·코드 (가족 · 스탭) ----------
+// ---------- 권한·코드 (가족 · 스탭 · 관리자) ----------
 async function accessView(ctx, body) {
+  const adm = ctx.session.admin;
   const st = await ctx.pub.state();
-  const all = ctx.core.collection('people').list();
+  const all = await adm.people();
+  const fams = new Map(ctx.core.collection('families').list().map(f => [f.id, f]));
   const members = new Map(ctx.core.collection('members').list().map(m => [m.id, m]));
-  const fam = all.filter(p => p.status !== 'revoked' && p.role !== 'staff').sort((a, b) => String(a.name).localeCompare(String(b.name), 'ko'));
-  const staff = all.filter(p => p.status !== 'revoked' && p.role === 'staff');
-  const gone = all.filter(p => p.status === 'revoked').sort((a, b) => String(b.revokedAt).localeCompare(String(a.revokedAt)));
-  const unassigned = ctx.pub.suggestFamilies();
-  const kids = p => (p.memberIds || []).map(id => members.get(id)).filter(Boolean).map(m => `<span class="chip">${esc(m.name)} ${esc(m.grade)}</span>`).join(' ');
-  const row = p => `<div class="rowi"><div class="t"><b>${esc(p.name)} ${p.role === 'staff' ? `<span class="chip sun">${esc((p.labels || []).join('·') || '스탭')}</span>` : ''}</b>
-      <small>로그인 이름: ${esc(p.login)} · 발급 ${esc(dateDot((p.issuedAt || '').slice(0, 10)))}</small><div style="margin-top:4px">${kids(p)}</div></div>
-      <div class="row" style="justify-content:flex-end"><button class="btn small soft" data-inv="${esc(p.id)}">초대 메시지</button><button class="btn small ghost" data-more="${esc(p.id)}">…</button></div></div>`;
-  const p0 = ctx.pub.parentRec() || {};
+  const act = all.filter(p => p.status === 'active');
+  const fam = act.filter(p => p.role === 'parent').sort((a, b) => String(a.name).localeCompare(String(b.name), 'ko'));
+  const staff = act.filter(p => p.role === 'staff');
+  const admins = act.filter(p => p.role === 'admin');
+  const gone = all.filter(p => p.status !== 'active');
+  const unassigned = await ctx.pub.suggestFamilies();
+  const kids = p => (fams.get(p.id)?.memberIds || []).map(id => members.get(id)).filter(Boolean).map(m => `<span class="chip">${esc(m.name)} ${esc(m.grade)}</span>`).join(' ');
+  const row = p => `<div class="rowi"><div class="t"><b>${esc(p.name)} ${p.role !== 'parent' ? `<span class="chip sun">${esc(p.roleLabel || p.roleName)}</span>` : ''}</b>
+      <small>로그인 이름: ${esc(p.identifier)} · 발급 ${esc(dateDot((p.issuedAt || '').slice(0, 10)))}${p.secret === 'passphrase' ? ' · 비밀문장으로 바꿈' : ''}</small><div style="margin-top:4px">${kids(p)}</div></div>
+      <button class="btn small ghost" data-more="${esc(p.id)}">관리</button></div>`;
   body.innerHTML = `<h1>권한·코드</h1>
     ${tokenWarnHtml(st)}
     <div class="card small"><b>누가 무엇을 보나요</b><br>
       · <b>공개</b>: 누구나 — 소개·입단 안내<br>
       · <b>학부모</b> (가족마다 코드 하나): 공지·일정·연주곡·악보·영상·사진·명단(이름과 학년)<br>
-      · <b>스탭</b> (사람마다 개인 코드): 학부모 화면 + 연락처 명단·예금주·회의자료·간식 당번, 회의자료·간식은 고칠 수 있어요<br>
-      · <b>관리자</b> (관리자 비밀번호): 모든 것 + 코드 발급·회수·역할 바꾸기<br>
-      코드는 공개 저장소의 keyring 에 암호문으로만 있어요. 탈퇴하면 그 코드의 칸을 빼고 열쇠를 바꿔서, <b>그 뒤에 올린 것은 볼 수 없어요</b>. 이미 휴대폰에 받아 둔 것은 지울 수 없어요.</div>
+      · <b>스탭</b> (사람마다 개인 코드): 학부모 화면 + 연락처 명단·예금주·회의자료·간식 당번 (회의자료·간식은 고칠 수 있음)<br>
+      · <b>관리자</b> (관리자 코드): 모든 것 + 코드 발급·회수·역할 바꾸기<br>
+      코드는 <b>만들 때 한 번만</b> 보여요(어디에도 저장하지 않음). 잃어버리면 "새 코드". 탈퇴·회수하면 그 자리를 지우고 열쇠를 바꿔서, <b>그 뒤에 올린 것은 볼 수 없어요</b>. 이미 휴대폰에 받아 둔 것은 지울 수 없어요. 서버가 없어서 "마지막 접속"은 알 수 없어요.</div>
     <div class="row between" style="margin-top:18px"><h2 style="margin:0">가족 <span class="chip brand">${fam.length}</span></h2>
       <div class="row">${unassigned.length ? `<button class="btn primary" id="auto-fam">${icon('people')} 명단으로 가족 ${unassigned.length}개 만들기</button>` : ''}<button class="btn soft" id="new-fam">${icon('plus')} 가족 추가</button></div></div>
     ${unassigned.length ? `<p class="help" style="margin-top:6px">아직 코드가 없는 아이: ${unassigned.flatMap(f => f.members.map(m => esc(m.name))).join(', ')} (연락처가 같으면 형제·자매로 한 가족)</p>` : ''}
     <div class="card rows" style="margin-top:10px">${fam.map(row).join('') || '<div class="empty">아직 가족 코드가 없어요.</div>'}</div>
     <div class="row between" style="margin-top:18px"><h2 style="margin:0">스탭 <span class="chip sun">${staff.length}</span></h2><button class="btn soft" id="new-staff">${icon('plus')} 스탭 추가</button></div>
     <div class="card rows" style="margin-top:10px">${staff.map(row).join('') || '<div class="empty">아직 스탭이 없어요.</div>'}</div>
-    ${gone.length ? `<details class="card" style="padding:0;overflow:hidden"><summary style="padding:14px 16px;cursor:pointer;font-weight:700">탈퇴·회수 ${gone.length}</summary><div class="rows">${gone.map(p => `<div class="rowi"><div class="t"><b>${esc(p.name)}</b><small>${esc(p.revokeNote || '회수')} · ${esc(timeAgo(p.revokedAt))} ${esc(p.revokedBy || '')}</small></div><button class="btn small ghost" data-back="${esc(p.id)}">다시 가입(새 코드)</button></div>`).join('')}</div></details>` : ''}
-    <div class="card"><h3>열쇠</h3><p class="small">학부모 열쇠 ${esc(p0.kid || '-')} · 스탭 열쇠 ${esc(p0.kidS || '-')} · 마지막으로 바꾼 때 ${esc(timeAgo(p0.rotatedAt))}</p>
-      ${(p0.rotations || []).slice(-5).reverse().map(r => `<div class="tiny muted">${esc(timeAgo(r.at))} · ${esc(r.why)} (${esc((r.roles || []).join(', '))}) · ${esc(r.by)}</div>`).join('')}
-      <button class="btn small ghost" id="rotate" style="margin-top:8px">학부모 열쇠 지금 바꾸기</button></div>`;
+    <h2 style="margin:18px 0 0">관리자 <span class="chip">${admins.length}</span></h2>
+    <div class="card rows" style="margin-top:10px">${admins.map(row).join('')}</div>
+    <details class="card"><summary><b>비밀문장 바꾸기 요청 적용</b> <span class="tiny muted">(학부모가 보낸 ACX1. 로 시작하는 글자)</span></summary>
+      <textarea id="acx" rows="3" style="margin-top:10px" placeholder="ACX1.…"></textarea><div class="row end" style="margin-top:6px"><button class="btn small soft" id="acx-ok">적용</button></div></details>
+    ${gone.length ? `<details class="card" style="padding:0;overflow:hidden"><summary style="padding:14px 16px;cursor:pointer;font-weight:700">탈퇴·회수 ${gone.length}</summary><div class="rows">${gone.map(p => `<div class="rowi"><div class="t"><b>${esc(p.name)}</b><small>${esc(p.roleName)} · ${esc(timeAgo(p.revokedAt))}</small></div><button class="btn small ghost" data-back="${esc(p.id)}">다시 허용(새 코드)</button></div>`).join('')}</div></details>` : ''}`;
 
-  const busyAll = async (label, fn) => {
-    await modal(`<div><p><span class="spin"></span> ${esc(label)}</p><p class="help">코드마다 암호를 단단히 거느라 하나에 1초쯤 걸려요.</p></div>`, {
-      onOpen: async (_, close) => { try { await fn(); close(); } catch (e) { close(); toastErr(e); } ctx.render(); },
+  const work = async (label, fn) => {
+    await modal(`<div><p><span class="spin"></span> ${esc(label)}</p><p class="help">코드마다 암호를 단단히 걸고 공개 사이트에 올리느라 하나에 몇 초씩 걸려요. 화면을 닫지 마세요.</p><div class="bar" style="margin-top:10px"><i id="work-bar" style="width:3%"></i></div></div>`, {
+      onOpen: async (b, close) => {
+        const bar = x => { const el = b.querySelector('#work-bar'); if (el) el.style.width = `${Math.round(x * 100)}%`; };
+        let out;
+        try { out = await fn(bar); close(); } catch (e) { close(); toastErr(e); }
+        if (out?.length) await invitesDialog(out);
+        ctx.render();
+      },
     });
   };
   body.querySelector('#auto-fam')?.addEventListener('click', async () => {
-    if (!(await confirmBox(`가족 ${unassigned.length}개의 코드를 만들어 반영할까요?\n${unassigned.map(f => f.name).join(', ')}`))) return;
-    await busyAll('가족 코드를 만드는 중…', async () => { for (const f of unassigned) await ctx.pub.issue(f); await ctx.pub.publish(); toast(`가족 코드 ${unassigned.length}개를 만들었어요. "초대 메시지"로 보내 주세요.`); });
+    if (!(await confirmBox(`가족 ${unassigned.length}개의 코드를 만들까요?\n${unassigned.map(f => f.name).join(', ')}\n\n코드는 다 만든 뒤 한 번에 보여 드려요(그때 복사·인쇄).`))) return;
+    await work('가족 코드를 만드는 중…', async bar => {
+      const out = [];
+      for (let i = 0; i < unassigned.length; i++) { out.push(await ctx.pub.addFamily(unassigned[i])); bar((i + 1) / unassigned.length); }
+      await ctx.pub.publish();
+      return out;
+    });
   });
+  body.querySelector('#acx-ok').onclick = async e => {
+    await busy(e.currentTarget, '적용 중…', async () => {
+      try { const p = await adm.applySecretChange(body.querySelector('#acx').value); toast(`${p.name}: 비밀문장으로 바꿨어요.`); ctx.render(); } catch (err) { toastErr(err); }
+    });
+  };
   body.querySelector('#new-fam').onclick = () => personDialog(ctx, 'parent');
   body.querySelector('#new-staff').onclick = () => personDialog(ctx, 'staff');
-  body.querySelector('#rotate').onclick = async () => {
-    if (await confirmBox('학부모 열쇠를 바꾸고 다시 반영할까요? 가족·스탭은 코드를 다시 넣지 않아도 돼요. (코드가 새어 나간 것 같을 때는 그 가족의 "코드 새로"를 쓰세요)')) await busyAll('열쇠를 바꾸는 중…', () => ctx.pub.rotate('관리자가 바꿈', ['parent']));
-  };
   body.onclick = async e => {
     const t = e.target.closest('button');
     if (!t) return;
-    const p = id => ctx.core.collection('people').get(id);
-    if (t.dataset.inv) inviteDialog(p(t.dataset.inv));
-    else if (t.dataset.back) { if (await confirmBox('다시 가입시키고 새 코드를 만들까요?')) await busyAll('새 코드를 만드는 중…', async () => { const n = await ctx.pub.reinstate(t.dataset.back); await ctx.pub.publish(); inviteDialog(n); }); }
-    else if (t.dataset.more) {
-      const x = p(t.dataset.more);
-      const v = await modal(`<div><div class="dlg-h"><h2>${esc(x.name)}</h2><button class="icon-btn" data-close aria-label="닫기">${icon('x')}</button></div>
-        <div class="quick-add">
-          <button data-close="edit">${icon('edit')} 이름·아이·로그인 이름 고치기</button>
-          <button data-close="reissue">${icon('refresh')} 코드 새로 만들기 <span class="tiny muted">(잃어버렸거나 남에게 보였을 때 — 예전 코드는 바로 못 씀)</span></button>
-          <button data-close="role">${icon('people')} ${x.role === 'staff' ? '스탭에서 빼기 (가족 권한만)' : '스탭으로 바꾸기'}</button>
-          <button data-close="revoke" style="color:var(--danger)">${icon('trash')} ${x.role === 'staff' ? '스탭 그만둠 (코드 회수)' : '탈퇴 처리 (코드 회수)'}</button>
-        </div></div>`);
-      if (v === 'edit') personDialog(ctx, x.role, x);
-      else if (v === 'reissue' && (await confirmBox('새 코드를 만들까요? 예전 코드는 바로 못 쓰고, 열쇠도 바꿔요. 새 초대 메시지를 보내 주세요.'))) await busyAll('새 코드를 만드는 중…', async () => inviteDialog(await ctx.pub.reissue(x.id)));
-      else if (v === 'role') {
-        if (x.role === 'staff') { if (await confirmBox(`${x.name} 님을 스탭에서 뺄까요? 스탭 열쇠를 바꾸고, GitHub 토큰도 바꾸라고 알려 드릴게요.`)) await busyAll('바꾸는 중…', () => ctx.pub.setRole(x.id, 'parent')); }
-        else if (await confirmBox(`${x.name} 을(를) 스탭으로 바꿀까요? 같은 코드로 스탭 화면(연락처 포함)이 열려요. 가족 모두가 같은 코드를 쓰면 가족 모두가 연락처를 봐요. 보통은 "스탭 추가"로 개인 코드를 따로 만드세요.`)) await busyAll('바꾸는 중…', () => ctx.pub.setRole(x.id, 'staff', ['스탭']));
-      } else if (v === 'revoke') {
-        const ok = await confirmBox(`${x.name} ${x.role === 'staff' ? '스탭 코드를 회수' : '탈퇴 처리'}할까요?\n\n· 이 코드는 바로 못 써요.\n· 열쇠를 바꿔서, 지금부터 올리는 내용은 볼 수 없어요.\n· 이미 휴대폰에 받아 둔 내용은 지울 수 없어요.\n· 기록은 "탈퇴·회수"에 남아요(다시 가입 가능).${x.role === 'staff' ? '\n· 스탭은 쓰기용 GitHub 토큰을 가졌으니, 끝난 뒤 토큰도 바꿔 주세요.' : ''}`, { ok: '회수하기', danger: true });
-        if (ok) await busyAll('코드를 회수하고 열쇠를 바꾸는 중…', async () => { await ctx.pub.revoke(x.id, x.role === 'staff' ? '스탭 그만둠' : '탈퇴'); toast('회수했어요.'); });
-      }
+    if (t.dataset.back) { if (await confirmBox('다시 허용하고 새 코드를 만들까요?')) await work('새 코드를 만드는 중…', async () => [await adm.resetCode(t.dataset.back)]); return; }
+    if (!t.dataset.more) return;
+    const x = all.find(p => p.id === t.dataset.more);
+    const isMe = x.id === ctx.session.person?.id;
+    const v = await modal(`<div><div class="dlg-h"><h2>${esc(x.name)}</h2><button class="icon-btn" data-close aria-label="닫기">${icon('x')}</button></div>
+      <p class="small muted">${esc(x.roleLabel || x.roleName)} · 로그인 이름 ${esc(x.identifier)}</p>
+      <div class="quick-add">
+        ${x.role === 'parent' ? `<button data-close="kids">${icon('people')} 아이 고치기</button>` : ''}
+        <button data-close="reset">${icon('refresh')} 새 코드 <span class="tiny muted">(잃어버렸거나 남에게 보였을 때 — 예전 코드는 바로 못 씀)</span></button>
+        ${x.role === 'parent' ? `<button data-close="to-staff">${icon('people')} 스탭으로 바꾸기</button>` : ''}
+        ${x.role === 'staff' ? `<button data-close="to-parent">${icon('people')} 스탭에서 빼기 (학부모 권한만)</button>` : ''}
+        ${isMe ? '' : `<button data-close="revoke" style="color:var(--danger)">${icon('trash')} ${x.role === 'parent' ? '탈퇴 처리' : '권한 회수'}</button>`}
+      </div></div>`);
+    if (v === 'kids') personDialog(ctx, 'parent', x);
+    else if (v === 'reset' && (await confirmBox('새 코드를 만들까요? 예전 코드는 바로 못 써요. 새 안내문을 보내 주세요.'))) await work('새 코드를 만드는 중…', async () => [await adm.resetCode(x.id)]);
+    else if (v === 'to-staff' && (await confirmBox(`${x.name} 을(를) 스탭으로 바꿀까요? 같은 코드로 연락처가 보이는 스탭 화면이 열려요. 가족이 같이 쓰는 코드라면 "스탭 추가"로 개인 코드를 따로 만드는 게 좋아요.`))) await work('바꾸는 중…', async () => { await adm.changeRole(x.id, 'staff', ['스탭']); return []; });
+    else if (v === 'to-parent' && (await confirmBox(`${x.name} 님을 스탭에서 뺄까요? 스탭 열쇠를 바꾸고, GitHub 토큰도 바꾸라고 알려 드릴게요.`))) await work('바꾸는 중…', async () => { const r = await adm.changeRole(x.id, 'parent'); if (r.tokenExposed) await ctx.pub.warnToken(x.name); return []; });
+    else if (v === 'revoke') {
+      const ok = await confirmBox(`${x.name} ${x.role === 'parent' ? '탈퇴 처리' : '권한 회수'}할까요?\n\n· 이 코드는 바로 못 써요.\n· 열쇠를 바꿔서, 지금부터 올리는 내용은 볼 수 없어요.\n· 이미 휴대폰에 받아 둔 내용은 지울 수 없어요.\n· 명단에는 "탈퇴·회수"로 남아요(다시 허용 가능).${x.canWrite ? '\n· 쓰기용 GitHub 토큰을 가졌던 분이라, 끝난 뒤 토큰도 바꿔 주세요.' : ''}`, { ok: '회수하기', danger: true });
+      if (ok) await work('자리를 지우고 열쇠를 바꾸는 중…', async () => { const r = await adm.revoke(x.id); if (r.tokenExposed) await ctx.pub.warnToken(x.name); if (r.recoveryCode) await showCodes([['새 명단 복구 코드', r.recoveryCode, '관리자를 막아서 새로 만들었어요']]); toast('회수했어요.'); return []; });
     }
   };
 }
 
-function inviteDialog(p) {
-  const msg = inviteMessage(p, `${location.origin}${location.pathname}`.replace(/tools\/demo\.html$/, ''));
-  modal(`<div><div class="dlg-h"><h2>초대 메시지</h2><button class="icon-btn" data-close aria-label="닫기">${icon('x')}</button></div>
-    <p class="small">문자·카톡으로 <b>${esc(p.name)}</b>에게만 보내 주세요.</p>
-    <textarea readonly rows="12" id="inv">${esc(msg)}</textarea>
-    <div class="row end" style="margin-top:10px"><button class="btn ghost" id="inv-print">${icon('down')} 카드 인쇄</button><button class="btn primary" id="inv-copy">${icon('copy')} 복사</button></div></div>`, {
+// 만든 코드들의 안내문 (지금 한 번만 보임)
+async function invitesDialog(list) {
+  const all = list.map(r => r.invitation).join('\n\n────────\n\n');
+  await modal(`<div><div class="dlg-h"><h2>안내문 ${list.length > 1 ? `${list.length}개` : ''}</h2><button class="icon-btn" data-close aria-label="닫기">${icon('x')}</button></div>
+    <div class="warn">코드는 <b>지금 한 번만</b> 보여요. 닫기 전에 각 가족·스탭에게 보내거나 카드로 인쇄하세요. 잃어버리면 "새 코드"로 다시 만들 수 있어요.</div>
+    ${list.map((r, i) => `<div class="card flat" style="margin-bottom:8px"><div class="row between"><b>${esc(r.person.name)}</b><span class="row"><button class="btn small soft" data-copy="${i}">${icon('copy')} 복사</button><button class="btn small ghost" data-print="${i}">카드</button></span></div>
+      <pre style="white-space:pre-wrap;font:inherit;font-size:13.5px;margin:8px 0 0">${esc(r.invitation)}</pre></div>`).join('')}
+    <div class="row end"><button class="btn ghost" id="cp-all">${icon('copy')} 모두 복사</button><button class="btn ghost" id="pr-all">${icon('down')} 모두 카드 인쇄</button><button class="btn primary" data-close>다 보냈어요</button></div></div>`, {
+    wide: true,
     onOpen: b => {
-      b.querySelector('#inv-copy').onclick = () => copyText(msg);
-      b.querySelector('#inv-print').onclick = () => {
-        const card = document.createElement('div');
-        card.id = 'print-card';
-        card.innerHTML = `<h2>자양교회 어린이 합창단</h2><p>${esc(p.name)}</p><p>주소: jayangchoir.github.io</p><p>이름: <b>${esc(p.login)}</b></p><p>코드: <b style="font-size:22px;letter-spacing:.08em">${esc(p.code)}</b></p><p class="small">이 카드는 ${p.role === 'staff' ? '본인만' : '우리 가족만'} 써 주세요.</p>`;
-        document.body.append(card);
-        document.body.classList.add('printing');
-        const done = () => { card.remove(); document.body.classList.remove('printing'); removeEventListener('afterprint', done); };
-        addEventListener('afterprint', done);
-        window.print();
-        setTimeout(done, 2000);
-      };
+      b.addEventListener('click', e => {
+        const c = e.target.closest('[data-copy]');
+        if (c) copyText(list[+c.dataset.copy].invitation);
+        const pr = e.target.closest('[data-print]');
+        if (pr) printCards([list[+pr.dataset.print]]);
+      });
+      b.querySelector('#cp-all').onclick = () => copyText(all);
+      b.querySelector('#pr-all').onclick = () => printCards(list);
     },
   });
 }
 
+function printCards(list) {
+  const info = r => ({ title: ACCESS_CONFIG.title, siteUrl: ACCESS_CONFIG.siteUrl, name: r.person.name, identifier: r.person.identifier, code: r.code, roleLabel: r.person.roleLabel || r.person.roleName });
+  if (list.length === 1) { printCard(info(list[0])); return; } // 공유 모듈의 카드 한 장 (바로 인쇄)
+  const box = document.createElement('div');
+  box.id = 'print-card';
+  box.innerHTML = list.map(info).map(x => `<div class="pc"><div>${esc(x.title)} · ${esc(x.roleLabel)}</div><div><b>${esc(x.name)}</b></div><div>주소: ${esc(x.siteUrl)}</div>
+    <div>이름: <b>${esc(x.identifier)}</b></div><div>접속 코드: <b style="font-size:15pt;letter-spacing:.06em">${esc(x.code)}</b></div><div class="tiny">본인(가족)만 쓰세요. 잃어버리면 새 코드를 받으세요.</div></div>`).join('');
+  document.body.append(box);
+  document.body.classList.add('printing');
+  const done = () => { box.remove(); document.body.classList.remove('printing'); removeEventListener('afterprint', done); };
+  addEventListener('afterprint', done);
+  window.print();
+  setTimeout(done, 3000);
+}
+
 async function personDialog(ctx, role, x = null) {
   const members = sortMembers(ctx.core.collection('members').list());
-  const labels = ROLES.find(r => r.id === 'staff').labels;
-  await modal(`<form id="pf"><div class="dlg-h"><h2>${x ? '고치기' : role === 'staff' ? '스탭 추가' : '가족 추가'}</h2><button type="button" class="icon-btn" data-close aria-label="닫기">${icon('x')}</button></div>
-    ${role === 'staff' ? `<label class="f"><span>이름 *</span><input id="p-name" value="${esc(x?.name || '')}" required placeholder="예: 김총무"></label>
-      <div class="f"><span style="font-weight:700;color:var(--text-2);font-size:14px">맡은 일</span><div class="row" style="margin-top:6px">${labels.map(l => `<label class="check" style="margin:0 8px 0 0"><input type="checkbox" value="${esc(l)}" data-lab${(x?.labels || []).includes(l) ? ' checked' : ''}> ${esc(l)}</label>`).join('')}</div></div>`
-    : `<div class="f"><span style="font-weight:700;color:var(--text-2);font-size:14px">아이 (형제·자매 모두)</span><div style="max-height:30vh;overflow:auto;margin-top:6px">${members.map(m => `<label class="check" style="margin:4px 0"><input type="checkbox" value="${esc(m.id)}" data-kid${(x?.memberIds || []).includes(m.id) ? ' checked' : ''}> ${esc(m.name)} <span class="tiny muted">${esc(m.grade)}</span></label>`).join('')}</div></div>
-      <label class="f"><span>가족 이름 *</span><input id="p-name" value="${esc(x?.name || '')}" required placeholder="예: 김하나·김두리 가족"></label>`}
-    <label class="f"><span>로그인 이름 * <span class="tiny muted">(로그인할 때 넣는 이름. 가족은 보통 아이 이름)</span></span><input id="p-login" value="${esc(x?.login || '')}" required></label>
+  const fam = x ? ctx.core.collection('families').get(x.id) : null;
+  const labels = ACCESS_CONFIG.roles.find(r => r.id === 'staff').labels;
+  await modal(`<form id="pf"><div class="dlg-h"><h2>${x ? '아이 고치기' : role === 'staff' ? '스탭 추가' : '가족 추가'}</h2><button type="button" class="icon-btn" data-close aria-label="닫기">${icon('x')}</button></div>
+    ${role === 'staff' ? `<label class="f"><span>이름 *</span><input id="p-name" required placeholder="예: 김총무"></label>
+      <div class="f"><span style="font-weight:700;color:var(--text-2);font-size:14px">맡은 일</span><div class="row" style="margin-top:6px">${labels.map(l => `<label class="check" style="margin:0 8px 0 0"><input type="checkbox" value="${esc(l)}" data-lab> ${esc(l)}</label>`).join('')}</div></div>`
+    : `<div class="f"><span style="font-weight:700;color:var(--text-2);font-size:14px">아이 (형제·자매 모두)</span><div style="max-height:30vh;overflow:auto;margin-top:6px">${members.map(m => `<label class="check" style="margin:4px 0"><input type="checkbox" value="${esc(m.id)}" data-kid${(fam?.memberIds || []).includes(m.id) ? ' checked' : ''}> ${esc(m.name)} <span class="tiny muted">${esc(m.grade)}</span></label>`).join('')}</div></div>
+      ${x ? '' : '<label class="f"><span>가족 이름 *</span><input id="p-name" required placeholder="예: 김하나·김두리 가족"></label>'}`}
+    ${x ? '' : `<label class="f"><span>로그인 이름 * <span class="tiny muted">(로그인할 때 넣는 이름. 가족은 보통 아이 이름)</span></span><input id="p-login" required></label>`}
     <div class="row end"><button type="button" class="btn ghost" data-close>취소</button><button class="btn primary" id="p-ok">${x ? '저장' : '코드 만들기'}</button></div></form>`, {
     onOpen: (b, close) => {
       const kidsSel = () => [...b.querySelectorAll('[data-kid]:checked')].map(i => members.find(m => m.id === i.value));
@@ -448,21 +492,26 @@ async function personDialog(ctx, role, x = null) {
         const ks = kidsSel();
         if (!x && ks.length) { b.querySelector('#p-name').value = `${ks.map(k => k.name).join('·')} 가족`; b.querySelector('#p-login').value = ks[0].name; }
       }));
-      b.querySelector('#p-name').addEventListener('input', e => { if (role === 'staff' && !x) b.querySelector('#p-login').value = e.target.value.trim(); });
+      b.querySelector('#p-name')?.addEventListener('input', e => { if (role === 'staff') b.querySelector('#p-login').value = e.target.value.trim(); });
       b.querySelector('#pf').onsubmit = async e => {
         e.preventDefault();
         await busy(b.querySelector('#p-ok'), '만드는 중…', async () => {
           try {
-            const f = { name: b.querySelector('#p-name').value.trim(), login: b.querySelector('#p-login').value.trim(), role,
-              memberIds: role === 'staff' ? [] : kidsSel().map(k => k.id), labels: role === 'staff' ? [...b.querySelectorAll('[data-lab]:checked')].map(i => i.value) : [] };
-            let rec;
             if (x) {
-              // 이름만 고치는 것은 코드를 바꾸지 않는다. 로그인 이름이 바뀌면 칸 자리가 바뀌므로 반영만 다시
-              rec = await ctx.core.collection('people').patch(x.id, f);
-            } else rec = await ctx.pub.issue(f);
+              await ctx.core.collection('families').put({ id: x.id, memberIds: kidsSel().map(k => k.id) });
+              close();
+              toast('저장했어요.');
+              ctx.render();
+              return;
+            }
+            const name = b.querySelector('#p-name').value.trim();
+            const identifier = b.querySelector('#p-login').value.trim();
+            const r = role === 'staff'
+              ? await ctx.session.admin.addPerson({ name, identifier, role: 'staff', labels: [...b.querySelectorAll('[data-lab]:checked')].map(i => i.value) })
+              : await ctx.pub.addFamily({ name, identifier, memberIds: kidsSel().map(k => k.id) });
             await ctx.pub.publish();
             close();
-            if (!x) inviteDialog(rec);
+            await invitesDialog([r]);
             ctx.render();
           } catch (err) { toastErr(err); }
         });
@@ -776,14 +825,14 @@ function settingsView(ctx, body) {
   const g = ctx.core.collection('settings').get('google') || {};
   body.innerHTML = `<h1>설정</h1>
     <div class="card"><h3>내 이름</h3><div class="row nowrap"><input id="me" value="${esc(s.user)}"><button class="btn soft" id="me-save">저장</button></div><p class="help" style="margin-top:6px">고친 사람으로 남아요.</p></div>
-    <div class="card"><h3>새 기기 연결 (QR)</h3><p class="small">다른 임원의 휴대폰을 연결할 때 이 QR 을 그 휴대폰 카메라로 찍게 하세요. 단체방에 올리지 말고 직접 보여 주세요.</p><button class="btn soft" id="qr">QR 보여 주기</button></div>
     <div class="card"><h3>사진 원본 보관 (Google)</h3>
       <p class="small">사진을 올릴 때 원본(줄이기 전, 촬영 정보 포함)을 합창단 Google 계정(${ACCOUNT_HINT})에 따로 보관해요. 처음 한 번 README 의 "Google 설정" 대로 클라이언트 ID 를 만들어 넣으세요.</p>
       <label class="f"><span>OAuth 클라이언트 ID</span><input id="g-cid" value="${esc(g.clientId || '')}" placeholder="…apps.googleusercontent.com"></label>
       <label class="check"><input type="checkbox" id="g-on"${g.enabled !== false ? ' checked' : ''}> 원본을 Google 포토에 보관</label>
       <label class="f"><span>보관할 곳</span><select id="g-be"><option value="photos"${g.backend !== 'drive' ? ' selected' : ''}>Google 포토 (앨범: 합창단 · 날짜 행사)</option><option value="drive"${g.backend === 'drive' ? ' selected' : ''}>Google Drive (폴더: 합창단 사진 원본/…) — 포토가 안 될 때</option></select></label>
       <div class="row"><button class="btn soft" id="g-save">저장</button><button class="btn ghost" id="g-sign">${ctx.gAuth.signedIn() ? 'Google 로그인됨 ✓' : 'Google 로그인'}</button></div></div>
-    <div class="card"><h3>관리자 비밀번호 · 복구 코드</h3><div class="row"><button class="btn soft" id="pw">관리자 비밀번호 바꾸기</button><button class="btn soft" id="rc">새 복구 코드</button></div></div>
+    <div class="card"><h3>비상용 열쇠</h3><p class="small">관리자는 평소 로그인 화면에서 관리자 코드로 들어와요. 아래는 코드를 모두 잃었을 때 쓰는 것들이에요.</p>
+      <div class="row"><button class="btn soft" id="mrc">새 명단 복구 코드</button><button class="btn soft" id="pw">관리자 데이터 비밀번호 바꾸기</button><button class="btn soft" id="rc">새 데이터 복구 코드</button></div></div>
     <div class="card"><h3>GitHub 토큰 바꾸기</h3><p class="small">1년에 한 번, 만료되기 전에. 다른 기기는 다음에 열 때 저절로 새 토큰을 써요. README 의 "토큰 만들기" 참고.</p>
       <div class="row nowrap"><input id="tok" type="password" autocomplete="off" placeholder="새 토큰"><button class="btn soft" id="tok-save">바꾸기</button></div></div>
     <div class="card"><h3>백업 · 휴지통</h3><div class="row"><button class="btn soft" id="bk">${icon('down')} 백업 받기 (암호화된 그대로)</button><a class="btn soft" href="#/admin/trash">${icon('trash')} 휴지통</a></div></div>
@@ -791,9 +840,7 @@ function settingsView(ctx, body) {
       <p class="help" style="margin-top:8px">${s.memoryOnly ? '이 브라우저는 기기에 저장할 수 없어서 탭을 닫으면 다시 연결해야 해요.' : '연결 끊기는 이 기기의 사본만 지워요(GitHub 데이터는 그대로). 아직 못 올린 변경이 있으면 거부해요.'}</p></div>`;
   const $ = s2 => body.querySelector(s2);
   $('#me-save').onclick = async () => { await ctx.core.setUser($('#me').value); toast('저장했어요.'); };
-  $('#qr').onclick = async () => {
-    try { const { svg } = await ctx.core.connectDeviceQR(); modal(`<div><h2>새 기기 연결</h2><div class="qr">${svg}</div><p class="small">새 휴대폰 카메라로 찍고, 열린 화면에서 관리자 비밀번호를 넣으세요.</p><div class="row end"><button class="btn primary" data-close>닫기</button></div></div>`); } catch (e) { toastErr(e); }
-  };
+  $('#mrc').onclick = async () => { if (await confirmBox('새 명단 복구 코드를 만들까요? 예전 코드는 바로 못 써요.')) { try { await showCodes([['명단 복구 코드', await ctx.session.admin.newRecoveryCode(), '관리자 코드를 잃었을 때']]); } catch (e) { toastErr(e); } } };
   $('#g-save').onclick = async () => {
     const cur = ctx.core.collection('settings').get('google') || {};
     await ctx.core.collection('settings').put({ ...cur, id: 'google', clientId: $('#g-cid').value.trim(), enabled: $('#g-on').checked, backend: $('#g-be').value });
@@ -816,13 +863,13 @@ function settingsView(ctx, body) {
       },
     });
   };
-  $('#rc').onclick = async () => { if (await confirmBox('새 복구 코드를 만들까요? 예전 코드는 바로 못 쓰게 돼요.')) { try { await showRecovery(await ctx.core.newRecoveryCode()); } catch (e) { toastErr(e); } } };
-  $('#tok-save').onclick = async e => { await busy(e.currentTarget, '확인 중…', async () => { try { await ctx.core.rotateToken($('#tok').value.trim()); $('#tok').value = ''; await ctx.pub.tokenRotated(); toast('토큰을 바꿨어요. 스탭들은 다음에 열 때 새 토큰을 받아요. 예전 토큰은 GitHub 에서 지우세요.'); } catch (err) { toastErr(err); } }); };
+  $('#rc').onclick = async () => { if (await confirmBox('새 데이터 복구 코드를 만들까요? 예전 코드는 바로 못 쓰게 돼요.')) { try { await showCodes([['데이터 복구 코드', await ctx.core.newRecoveryCode(), '관리자 데이터 비밀번호를 잊었을 때']]); } catch (e) { toastErr(e); } } };
+  $('#tok-save').onclick = async e => { await busy(e.currentTarget, '확인 중…', async () => { try { const t = $('#tok').value.trim(); await ctx.core.rotateToken(t); await ctx.session.admin.setToken(t); await ctx.pub.clearTokenWarn(); $('#tok').value = ''; toast('토큰을 바꿨어요. 스탭들은 다음에 열 때 새 토큰을 받아요. 예전 토큰은 GitHub 에서 지우세요.'); } catch (err) { toastErr(err); } }); };
   $('#bk').onclick = async () => { try { download(new Blob([await ctx.core.exportBackup()], { type: 'application/json' }), `jayangchoir-backup-${ymd()}.json`); } catch (e) { toastErr(e); } };
   $('#lock').onclick = () => { location.hash = '#/logout'; };
   $('#forget').onclick = async () => {
     if (!(await confirmBox('이 기기의 연결과 사본을 지울까요? GitHub 의 데이터는 그대로예요.', { ok: '연결 끊기', danger: true }))) return;
-    try { await ctx.gAuth.revoke(); await ctx.core.forgetDevice(); await ctx.session.logout(); ctx.go('#/'); } catch (e) { toastErr(e); }
+    try { await ctx.gAuth.revoke(); await ctx.session.logout(); await ctx.core.forgetDevice(); ctx.go('#/'); } catch (e) { toastErr(e); }
   };
 }
 

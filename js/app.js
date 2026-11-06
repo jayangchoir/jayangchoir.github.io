@@ -15,7 +15,7 @@ import { staffView } from './views-staff.js';
 const PARENT_NAV = [['home', '홈', 'home'], ['schedule', '일정', 'cal'], ['songs', '연주곡', 'music'], ['videos', '영상', 'video'], ['photos', '사진', 'photo'], ['roster', '명단', 'people']];
 const PARENT_ROUTES = new Set(['home', 'schedule', 'songs', 'videos', 'photos', 'roster', 'notices']);
 
-export async function start({ core, session, read, limit, demo = false, uploadsDb, staffBackend }) {
+export async function start({ core, access, session, read, limit, demo = false, uploadsDb }) {
   initModal();
   const settings = () => core.collection('settings');
   const gcfg = () => (core.status().open ? settings().get('google') || {} : {});
@@ -29,8 +29,8 @@ export async function start({ core, session, read, limit, demo = false, uploadsD
     setAlbumId: async (k, v) => { const g = gcfg(); await settings().put({ ...g, id: 'google', albums: { ...(g.albums || {}), [k]: v } }); },
   });
   const ctx = {
-    core, session, parent: session, media, read, demo, gAuth, originals, staffBackend,
-    pub: createPublisher({ core }),
+    core, access, session, parent: session, media, read, demo, gAuth, originals,
+    pub: createPublisher({ core, access, getAdmin: async () => session.admin }),
     uploads: null,
     ui: {},
     blobUrls: [],
@@ -95,8 +95,8 @@ export async function start({ core, session, read, limit, demo = false, uploadsD
     const r = route();
     const view = $('#view');
     for (const u of ctx.blobUrls.splice(0)) URL.revokeObjectURL(u);
-    // 관리자가 잠겼으면(다른 기기에서 비밀번호가 바뀌는 등) 역할도 맞춘다
-    if (session.role === 'admin' && !core.status().open) { await session.load(); }
+    // 관리자로 로그인했는데 데이터 저장소가 잠겼으면(잠금·다른 탭) 관리자 꾸러미로 다시 연다
+    if (session.role === 'admin' && (!core.status().open || !session.admin)) await session.openAdminIfNeeded();
     if (r[0] === 'logout') {
       await gAuth.revoke();
       ctx.uploads.stop();
@@ -111,9 +111,8 @@ export async function start({ core, session, read, limit, demo = false, uploadsD
     renderUploads(ctx, ctx.uploads.snapshot());
     document.title = '자양교회 어린이 합창단';
     if (r[0] === 'admin') {
-      // 관리자 기기가 연결되어 있는데 잠겨 있으면 → 하나뿐인 로그인 화면으로
-      if (core.status().connected && !core.status().open) { location.hash = '#/login'; return; }
-      if (core.status().open && session.role !== 'admin') await session.refreshAdmin();
+      // 로그인은 하나뿐: 관리자 코드로 로그인하지 않았으면 → 로그인 화면 (처음 설정·복구는 아직 아무도 없을 때만 여기서)
+      if (session.role !== 'admin' && session.role !== 'public') { location.hash = '#/home'; return; }
       try { await adminView(ctx, view, r.slice(1)); } catch (e) { console.error(e); view.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
       return;
     }
@@ -187,10 +186,9 @@ function schedulePublish(ctx) {
   clearTimeout(pubT);
   pubT = setTimeout(async () => {
     try {
-      const p = ctx.pub.parentRec();
-      if (!p?.k || !navigator.onLine || !ctx.core.status().open) return;
+      if (ctx.session.role !== 'admin' || !navigator.onLine || !ctx.core.status().open) return;
       const r = await ctx.pub.publish();
-      if (r.changed) { toast('학부모 화면에 반영했어요.'); await ctx.session.refreshAdmin(); }
+      if (r.changed) { toast('학부모 화면에 반영했어요.'); await ctx.session.loadContent(); }
       if (location.hash.startsWith('#/admin')) document.dispatchEvent(new CustomEvent('jc:published'));
     } catch (e) {
       if (e.code === 'contact-leak') toastErr(e);

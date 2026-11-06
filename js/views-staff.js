@@ -1,5 +1,5 @@
 // 스탭 화면 — 연락처 명단 · 회의자료(첨부) · 간식 당번. 스탭과 관리자만.
-// 연락처는 스탭 묶음(p/staff.json, 스탭 열쇠)에서, 회의자료·간식은 스탭이 쓴 기록(p/s/…)에서 온다.
+// 연락처는 스탭 등급 항목 'staff-info'(관리자가 반영)에서, 회의자료·간식은 스탭이 직접 쓴 스탭 등급 항목에서 온다 (access.js).
 import { esc, textHtml, icon, toast, toastErr, modal, confirmBox, busy, dateKo, dateDot, size, ymd, download, inlinePdfOk, timeAgo } from './ui.js';
 import { createStaffStore } from './staff.js';
 
@@ -8,7 +8,7 @@ const TABS = [['', '연락처'], ['meetings', '회의자료'], ['snacks', '간�
 export async function staffView(ctx, view, r) {
   const s = ctx.session;
   if (!s.has('staff')) { view.innerHTML = '<div class="card empty">스탭만 볼 수 있어요.</div>'; return; }
-  ctx.staffStore ||= createStaffStore({ session: s, ...(ctx.staffBackend ? { backendFor: ctx.staffBackend } : {}) });
+  ctx.staffStore ||= createStaffStore({ access: s.access });
   const tab = r[0] || '';
   view.innerHTML = `<h1>스탭</h1>
     <nav class="admin-tabs" aria-label="스탭 메뉴">${TABS.map(([k, l]) => `<a href="#/staff${k ? `/${k}` : ''}" class="${tab === k ? 'on' : ''}">${l}</a>`).join('')}</nav>
@@ -45,7 +45,7 @@ async function meetings(ctx, body) {
     ${list.map(m => `<div class="card" style="margin-top:12px"><div class="row between"><div><h3 style="margin:0">${esc(m.title)}</h3><span class="small muted">${esc(dateKo(m.date, { year: true }))} · ${esc(m.updatedBy || m.createdBy || '')} ${esc(timeAgo(m.updatedAt))}</span></div>
       <button class="icon-btn" data-edit="${esc(m.id)}" aria-label="고치기">${icon('edit')}</button></div>
       ${m.body ? `<div class="txt" style="margin-top:8px">${textHtml(m.body)}</div>` : ''}
-      ${(m.attachments || []).map((a, i) => `<div class="att" style="margin-top:8px">${icon(/pdf/.test(a.t) ? 'pdf' : 'photo')}<span class="grow">${esc(a.n)}</span><span class="tiny muted">${size(a.s)}</span><button class="btn small soft" data-open="${esc(m.id)}|${i}">보기</button></div>`).join('')}
+      ${(m.attachments || []).map((a, i) => `<div class="att" style="margin-top:8px">${icon(/pdf/.test(a.type) ? 'pdf' : 'photo')}<span class="grow">${esc(a.name)}</span><span class="tiny muted">${size(a.size)}</span><button class="btn small soft" data-open="${esc(m.id)}|${i}">보기</button></div>`).join('')}
       ${m._conflicts?.length ? '<div class="warn">두 분이 같은 때 고친 내용이 있어요. 고치기를 눌러 확인해 주세요.</div>' : ''}</div>`).join('') || '<div class="card empty" style="margin-top:12px">아직 회의자료가 없어요.</div>'}`;
   body.onclick = async e => {
     const t = e.target.closest('button');
@@ -63,7 +63,7 @@ async function editMeeting(ctx, m) {
     <label class="f"><span>제목 *</span><input id="m-title" value="${esc(m?.title || '')}" required></label>
     <label class="f"><span>날짜</span><input id="m-date" type="date" value="${esc(m?.date || ymd())}"></label>
     <label class="f"><span>내용</span><textarea id="m-body" rows="6">${esc(m?.body || '')}</textarea></label>
-    <div id="m-atts">${keep.map((a, i) => `<div class="att">${icon('pdf')}<span class="grow">${esc(a.n)}</span><button type="button" class="icon-btn" data-rm="${i}" aria-label="빼기">${icon('x')}</button></div>`).join('')}</div>
+    <div id="m-atts">${keep.map((a, i) => `<div class="att">${icon('pdf')}<span class="grow">${esc(a.name)}</span><button type="button" class="icon-btn" data-rm="${i}" aria-label="빼기">${icon('x')}</button></div>`).join('')}</div>
     <label class="btn small soft">${icon('upload')} 파일 붙이기 (여러 개)<input type="file" id="m-files" multiple hidden></label> <span class="tiny muted" id="m-pick"></span>
     <div id="m-prog"></div>
     <div class="row between" style="margin-top:12px">${m ? `<button type="button" class="btn ghost" id="m-del" style="color:var(--danger)">${icon('trash')} 휴지통</button>` : '<span></span>'}
@@ -93,15 +93,15 @@ async function editMeeting(ctx, m) {
 }
 
 async function openAttachment(ctx, a) {
-  modal(`<div><div class="dlg-h"><h2 style="font-size:18px">${esc(a.n)}</h2><button class="icon-btn" data-close aria-label="닫기">${icon('x')}</button></div><div id="att-body"><p class="muted"><span class="spin"></span> 여는 중…</p></div></div>`, { wide: true });
+  modal(`<div><div class="dlg-h"><h2 style="font-size:18px">${esc(a.name)}</h2><button class="icon-btn" data-close aria-label="닫기">${icon('x')}</button></div><div id="att-body"><p class="muted"><span class="spin"></span> 여는 중…</p></div></div>`, { wide: true });
   try {
     const blob = await ctx.staffStore.file(a);
-    const pdf = /pdf/.test(a.t) || /\.pdf$/i.test(a.n);
-    const url = URL.createObjectURL(new Blob([blob], { type: pdf ? 'application/pdf' : a.t || 'application/octet-stream' }));
+    const pdf = /pdf/.test(a.type) || /\.pdf$/i.test(a.name);
+    const url = URL.createObjectURL(new Blob([blob], { type: pdf ? 'application/pdf' : a.type || 'application/octet-stream' }));
     ctx.blobUrls.push(url);
     const el = document.getElementById('att-body');
-    if (el) el.innerHTML = `${pdf && inlinePdfOk() ? `<iframe class="pdf-frame" src="${url}" title="${esc(a.n)}"></iframe>` : /^image\//.test(a.t) ? `<img src="${url}" alt="" style="width:100%;border-radius:10px">` : ''}
-      <div class="row" style="margin-top:12px"><a class="btn primary" href="${url}" target="_blank" rel="noopener">${icon('ext')} 새 탭에서 열기</a><a class="btn soft" href="${url}" download="${esc(a.n)}">${icon('down')} 내려받기</a></div>`;
+    if (el) el.innerHTML = `${pdf && inlinePdfOk() ? `<iframe class="pdf-frame" src="${url}" title="${esc(a.name)}"></iframe>` : /^image\//.test(a.type) ? `<img src="${url}" alt="" style="width:100%;border-radius:10px">` : ''}
+      <div class="row" style="margin-top:12px"><a class="btn primary" href="${url}" target="_blank" rel="noopener">${icon('ext')} 새 탭에서 열기</a><a class="btn soft" href="${url}" download="${esc(a.name)}">${icon('down')} 내려받기</a></div>`;
   } catch (e) { const el = document.getElementById('att-body'); if (el) el.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
 }
 

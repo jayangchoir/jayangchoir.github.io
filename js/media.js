@@ -91,7 +91,7 @@ export function createMedia({ core, limit = REPO_LIMIT, read = fetchPublic } = {
     if (cur && cur.bytes + size <= limit) return cur.n;
     if (cur && cur.bytes === 0) return cur.n; // 빈 저장소에는 큰 파일 하나라도 넣는다
     const n = cur ? cur.n + 1 : 1;
-    await core.account().createRepo(repoName(n), { description: '자양교회 어린이 합창단 사진·악보 (암호화되어 있음)', private: false });
+    await core.backend({ owner: OWNER, repo: repoName(n) }).createRepo(repoName(n), { description: '자양교회 어린이 합창단 사진·악보 (암호화되어 있음)' });
     const st = settings().get('storage') || { id: 'storage', repos: [] };
     await settings().put({ ...st, id: 'storage', repos: [...new Set([...(st.repos || []), n])].sort((a, b) => a - b) });
     return n;

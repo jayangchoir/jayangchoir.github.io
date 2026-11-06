@@ -396,5 +396,6 @@ table.tbl tr:hover td { background: #fafaff; cursor: pointer; }
 #print-card { display: none; }
 @media print {
   body.printing > *:not(#print-card) { display: none !important; }
-  body.printing #print-card { display: block; border: 2px dashed #888; border-radius: 14px; padding: 24px; width: 90mm; margin: 10mm; font-size: 15px; }
+  body.printing #print-card { display: flex; flex-wrap: wrap; gap: 6mm; }
+  body.printing #print-card .pc { border: 1.5px dashed #888; border-radius: 10px; padding: 5mm; width: 85mm; font-size: 11pt; break-inside: avoid; }
 }

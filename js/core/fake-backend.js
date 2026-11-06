@@ -1,30 +1,46 @@
-// 시험용 가짜 GitHub (메모리). 인터넷 없이 core.js 를 시험할 때 쓴다 (core-test.html).
+// 시험용 가짜 GitHub (메모리). 인터넷 없이 core.js · access.js 를 시험할 때 쓴다 (core-test.html, access-test.html).
 //   const repo = new FakeRepo(['tok-1']);          // 쓸 수 있는 토큰 목록
 //   createCore({ backend: (token) => repo.client(token), ... })
 //   repo.online = false        → 모든 요청이 status 0 (인터넷 없음)
 //   repo.revoke('tok-1')       → 그 토큰은 401
 //   repo.beforePut = async (path) => { … }   → 올리기 직전에 끼어들기 (동시에 고치기 흉내)
+//   repo.beforeCommit = async (files) => { … } → commit 직전에 끼어들기
+//   repo.commitLog             → [{ sha, message, paths }]  커밋 하나마다 한 줄
+//
+// 저장소 여러 개 (access.js: 공개 사이트 저장소 + 파일 저장소 <site>-files-N):
+//   const gh = new FakeGitHub({ owner: 'jayangchild', tokens: ['pub'], creators: ['pub'] });
+//   gh.repo('jayangchild.github.io', { isPublic: true })
+//   gh.client(token, 'jayangchild.github.io')   → GitHubBackend 와 같은 모양 (+ head · commit · createRepo)
+//   gh.reader('jayangchild.github.io')          → 토큰 없이 공개 저장소 읽기 (access.js 의 reader 모양)
 
 import { BackendError } from './github.js';
 
+const tick = () => new Promise(r => setTimeout(r, 0));
+
 export class FakeRepo {
-  constructor(tokens = []) {
+  constructor(tokens = [], { name = '', isPublic = false } = {}) {
+    this.name = name;
+    this.isPublic = isPublic;
     this.files = new Map(); // path → { sha, bytes }
     this.tokens = new Set(tokens);
     this.online = true;
     this.n = 0;
     this.log = []; // [method, path]
     this.beforePut = null;
+    this.beforeCommit = null;
     this.conflicts = 0; // 409/422 를 돌려준 횟수
+    this.commitLog = [];
   }
 
   addToken(t) { this.tokens.add(t); }
   revoke(t) { this.tokens.delete(t); }
+  headSha() { return this.commitLog.length ? this.commitLog[this.commitLog.length - 1].sha : null; }
+  addCommit(message, paths) { this.commitLog.push({ sha: `c${this.commitLog.length + 1}`, message, paths }); }
 
   client(token) {
     const repo = this;
     const gate = async () => {
-      await new Promise(r => setTimeout(r, 0));
+      await tick();
       if (!repo.online) throw new BackendError(0, '인터넷에 연결되어 있지 않아요.');
       if (!repo.tokens.has(token)) throw new BackendError(401, '토큰이 틀렸거나 만료되었어요.');
     };
@@ -42,14 +58,7 @@ export class FakeRepo {
         const f = repo.files.get(path);
         return f ? { sha: f.sha, bytes: f.bytes.slice() } : null;
       },
-      async commitFiles(files) {
-        await gate();
-        if (repo.beforePut) { const h = repo.beforePut; repo.beforePut = null; await h(files[0]?.path); }
-        repo.log.push(['commit', files.map(f => f.path).join(',')]);
-        for (const f of files) repo.files.set(f.path, { sha: `sha${++repo.n}`, bytes: new TextEncoder().encode(f.text) });
-        return `c${repo.n}`;
-      },
-      async put(path, bytes, sha) {
+      async put(path, bytes, sha, message = 'save') {
         await gate();
         if (repo.beforePut) { const h = repo.beforePut; repo.beforePut = null; await h(path); }
         repo.log.push(['put', path]);
@@ -58,73 +67,81 @@ export class FakeRepo {
         if ((cur?.sha || null) !== (sha || null)) { repo.conflicts++; throw new BackendError(409, `${path} does not match ${sha}`); }
         const nsha = `sha${++repo.n}`;
         repo.files.set(path, { sha: nsha, bytes: bytes.slice() });
+        repo.addCommit(message, [path]);
         return nsha;
       },
+      // 지금 브랜치 끝 커밋 (빈 저장소면 null)
+      async head() { await gate(); return repo.headSha(); },
+      // 여러 파일을 커밋 하나로. parent 가 지금 끝 커밋이 아니면(누가 먼저 올림) 409
+      async commit(files, message, parent) {
+        await gate();
+        if (repo.beforeCommit) { const h = repo.beforeCommit; repo.beforeCommit = null; await h(files); }
+        repo.log.push(['commit', files.map(f => f.path)]);
+        if ((parent || null) !== repo.headSha()) { repo.conflicts++; throw new BackendError(409, 'Update is not a fast forward'); }
+        for (const f of files) repo.files.set(f.path, { sha: `sha${++repo.n}`, bytes: f.bytes.slice() });
+        repo.addCommit(message, files.map(f => f.path));
+        return repo.headSha();
+      },
     };
+  }
+
+  // 토큰 없이 읽기 (공개 저장소만)
+  read(path) {
+    if (!this.isPublic) throw new BackendError(404, 'Not Found');
+    if (!this.online) throw new BackendError(0, '인터넷에 연결되어 있지 않아요.');
+    const f = this.files.get(path);
+    return f ? f.bytes.slice() : null;
   }
 }
 
-// 계정 하나 (저장소 여러 개). 합창단 시험용: 데이터 저장소 + 공개 사이트 저장소 + 사진 저장소 choir-photos-N
-//   const gh = new FakeGitHub(['tok-1'], ['jayangchoir-data', 'jayangchoir.github.io']);
-//   createCore({ backend: (t, dev) => gh.client(t, dev), account: t => gh.account(t) })
 export class FakeGitHub {
-  constructor(tokens = [], names = []) {
-    this.tokens = new Set(tokens);
-    this.repos = new Map(); // 이름 → { repo: FakeRepo, private }
-    this.online = true;
-    for (const n of names) this.add(n, n.endsWith('-data'));
+  constructor({ owner = 'owner', tokens = [], creators = [] } = {}) {
+    this.owner = owner;
+    this.tokens = new Set(tokens); // 모든 저장소에 쓸 수 있는 토큰
+    this.creators = new Set(creators); // 새 저장소를 만들 수 있는 토큰
+    this.repos = new Map();
+    this.created = []; // createRepo 로 만든 이름
   }
 
-  add(name, priv = false) {
+  repo(name, { isPublic = true } = {}) {
     if (!this.repos.has(name)) {
-      const repo = new FakeRepo();
-      repo.tokens = this.tokens; // 토큰 목록을 함께 쓴다
-      this.repos.set(name, { repo, private: priv });
+      const r = new FakeRepo([], { name, isPublic });
+      r.tokens = this.tokens;
+      this.repos.set(name, r);
     }
-    return this.repos.get(name).repo;
+    return this.repos.get(name);
   }
 
-  repo(name) { return this.repos.get(name)?.repo || null; }
+  setOnline(v) { for (const r of this.repos.values()) r.online = v; }
 
-  client(token, dev) {
-    const r = this.repo(dev.repo);
-    if (!r) {
-      const gate = async () => { throw new BackendError(404, `${dev.repo} 저장소가 없어요.`); };
-      return { token, check: gate, tree: gate, get: gate, put: gate, commitFiles: gate };
-    }
-    r.online = this.online;
-    return r.client(token);
-  }
-
-  account(token) {
+  client(token, name) {
     const gh = this;
-    const gate = async () => {
-      await new Promise(res => setTimeout(res, 0));
-      if (!gh.online) throw new BackendError(0, '인터넷에 연결되어 있지 않아요.');
-      if (!gh.tokens.has(token)) throw new BackendError(401, '토큰이 틀렸거나 만료되었어요.');
-    };
-    return {
-      async repoInfo(name) {
-        await gate();
-        const r = gh.repos.get(name);
-        if (!r) return null;
-        let bytes = 0;
-        for (const f of r.repo.files.values()) bytes += f.bytes.length;
-        return { private: r.private, size: Math.round(bytes / 1024), branch: 'main' };
-      },
-      async createRepo(name, { private: priv = false } = {}) {
-        await gate();
-        gh.add(name, priv);
-        return this.repoInfo(name);
-      },
-    };
+    const createRepo = n => gh.createRepoBy(token, n);
+    if (!gh.repos.has(name)) {
+      const nf = async () => { await tick(); throw new BackendError(404, 'Not Found'); };
+      return { token, check: nf, tree: nf, get: nf, put: nf, head: nf, commit: nf, createRepo };
+    }
+    return { ...gh.repo(name).client(token), createRepo };
   }
 
-  // 공개 저장소를 토큰 없이 읽기 (raw.githubusercontent.com 흉내). 없으면 null
-  raw(name, path) {
-    const r = this.repos.get(name);
-    if (!r || r.private) return null;
-    const f = r.repo.files.get(path);
-    return f ? f.bytes.slice() : null;
+  async createRepoBy(token, name) {
+    await tick();
+    if (!this.tokens.has(token)) throw new BackendError(401, '토큰이 틀렸거나 만료되었어요.');
+    if (this.repos.has(name)) return { name, created: false };
+    if (!this.creators.has(token)) throw new BackendError(403, 'Resource not accessible by personal access token');
+    const r = this.repo(name, { isPublic: true });
+    r.files.set('README.md', { sha: `sha${++r.n}`, bytes: new TextEncoder().encode(`# ${name}\n`) });
+    r.addCommit('Initial commit', ['README.md']);
+    this.created.push(name);
+    return { name, created: true };
+  }
+
+  // access.js 의 reader 모양: site(path) · file(repo, path) → Uint8Array | null
+  reader(siteRepo) {
+    const gh = this;
+    return {
+      async site(path) { await tick(); return gh.repo(siteRepo).read(path); },
+      async file(repo, path) { await tick(); return gh.repos.has(repo) ? gh.repo(repo).read(path) : null; },
+    };
   }
 }

@@ -2,10 +2,11 @@
 import { createCore } from './js/core/core.js';
 import { FakeGitHub } from './js/core/fake-backend.js';
 import { BackendError } from './js/core/github.js';
-import { newAccessCode, normCode, lookupId, makeSlotHead, openSlot, sealSlot, newKey, ROLES, roleClosure } from './js/core/access.js';
-import { CONTENT_PATH, KEYRING_PATH, PUBLIC_PATH, STAFF_PATH, albumPath, openItem } from './js/tier.js';
+import * as C from './js/core/crypto.js';
+import { indexPath, KEYRING } from './js/core/access.js';
+import { makeAccess, ITEM } from './js/access-config.js';
 import { buildBundle, assertNoContacts, MEMBER_PRIVATE } from './js/bundle.js';
-import { createPublisher, inviteMessage } from './js/publish.js';
+import { createPublisher } from './js/publish.js';
 import { createSession } from './js/session.js';
 import { createStaffStore } from './js/staff.js';
 import { createMedia, repoName } from './js/media.js';
@@ -54,18 +55,25 @@ const FAKE = {
 const SECRETS = ['홍예금', '박총무', '010-9999-0001', '01099990001', '김부모', '이보호', '박엄마', '010-1111-2222', '01011112222', '3333-4444', '01055556666', '7777-8888', '자매 (긴급'];
 
 const RUN = Date.now().toString(36);
-const gh = new FakeGitHub(['tok-1'], ['jayangchoir-data', 'jayangchoir.github.io']);
-const raw = async (n, p) => { const b = gh.raw(repoName(n), p); if (!b) throw Object.assign(new Error('없음'), { status: 404 }); return b; };
-const siteText = async p => { const b = gh.raw('jayangchoir.github.io', p.split('?')[0]); return b ? td.decode(b) : null; };
-const siteAll = () => [...gh.repo('jayangchoir.github.io').files].map(([p, f]) => `${p}\n${td.decode(f.bytes)}`).join('\n');
+const gh = new FakeGitHub({ owner: 'jayangchoir', tokens: ['tok-1', 'tok-2'], creators: ['tok-1', 'tok-2'] });
+gh.repo('jayangchoir-data', { isPublic: false });
+const siteRepo = gh.repo('jayangchoir.github.io', { isPublic: true });
+siteRepo.files.set('index.html', { sha: 'sha0', bytes: C.utf8('<!doctype html>') });
+siteRepo.addCommit('init', ['index.html']);
+const reader = gh.reader('jayangchoir.github.io');
+const raw = async (n, p) => { const b = await reader.file(repoName(n), p); if (!b) throw Object.assign(new Error('없음'), { status: 404 }); return b; };
+const siteAll = () => [...siteRepo.files].map(([p, f]) => `${p}\n${td.decode(f.bytes)}`).join('\n');
+const siteJSON = p => JSON.parse(td.decode(siteRepo.files.get(p).bytes));
 const dbs = [];
 const db = tag => { const n = `jc-tier-${RUN}-${tag}`; dbs.push(n); return n; };
-const mkCore = tag => createCore({ dbName: db(tag), backend: (t, dev) => gh.client(t, dev), account: t => gh.account(t), autoSync: false, user: tag, siteUrl: 'https://jayangchoir.github.io/' });
-const ADMIN_PW = 'admin-pass-1234';
-const mkSession = (tag, core = null) => createSession({ getText: siteText, read: raw, dbName: db(tag), core });
-const staffStore = s => createStaffStore({ session: s, backendFor: (t, dev) => gh.client(t, dev) });
-let FAM = {}; // 이름 → 가족 기록 (코드 포함)
-let STAFF1, STAFF2;
+const mkCore = tag => createCore({ dbName: db(tag), backend: (t, dev) => gh.client(t, dev.repo), autoSync: false, user: tag, siteUrl: 'https://jayangchoir.github.io/' });
+const mkAccess = kvName => makeAccess({ reader, backendFor: (t, r) => gh.client(t, r.repo), kvName });
+// 기기 하나 = access + session (core 는 관리자 기기만)
+const mkSession = (tag, core = null, kvName = db(`ax-${tag}`)) => { const access = mkAccess(kvName); return Object.assign(createSession({ access, core, read: raw }), { kvName }); };
+const staffStore = s => createStaffStore({ access: s.access });
+const CORE_PW = 'core-pass-1234';
+const FAM = {}; // 로그인 이름 → { person, code }
+let STAFF1, STAFF2, admin, adminCode;
 
 async function jpeg(w, h, seed = 1) {
   const c = new OffscreenCanvas(w, h);
@@ -82,82 +90,77 @@ function pdfBytes(n) {
 
 let A, pub, media, ups;
 
-// ---------- 1. 암호 ----------
-await test('접속 코드: 60비트(32글자×12), 대소문자·하이픈 상관없음, 틀리면 칸이 안 열림 (PBKDF2 60만 회)', async () => {
-  const codes = new Set(Array.from({ length: 200 }, newAccessCode));
-  eq(codes.size, 200, '겹치지 않음');
-  for (const c of codes) assert(/^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/.test(c), `모양 ${c}`);
-  const code = newAccessCode();
-  const pk = newKey();
-  const head = await makeSlotHead(code, pk);
-  const slot = await sealSlot(head, pk, { role: 'parent', keys: { parent: 'x' } }, 'parent');
-  eq((await openSlot(slot, code.toLowerCase().replace(/-/g, ' '))).bundle.role, 'parent', '소문자·띄어쓰기로도 열림');
-  assert((await openSlot(slot, newAccessCode())) === null, '다른 코드');
-  assert((await lookupId('s', ' 김 하나 ')) === (await lookupId('s', '김하나')), '이름 정규화');
-  eq([...roleClosure(ROLES, 'staff')].sort(), ['parent', 'public', 'staff'], '스탭은 학부모·공개를 물려받음');
-  eq(normCode('k7qx m2pa-9trd'), 'K7QXM2PA9TRD', '코드 정규화');
-});
-
-await test('관리자: setup → 준비된 자료 넣기 → 두 번 넣어도 그대로', async () => {
+// ---------- 1. 관리자 준비 ----------
+let AS;
+await test('관리자: core setup + access.setup(관리자 코드·명단 복구 코드) → 준비된 자료 넣기 → 두 번 넣어도 그대로', async () => {
   A = mkCore('A');
-  await A.setup('tok-1', ADMIN_PW, { user: '관리자A' });
-  pub = createPublisher({ core: A });
+  await A.setup('tok-1', CORE_PW, { user: '관리자A' });
+  AS = mkSession('admin', A);
+  const r = await AS.access.setup(A, { token: 'tok-1', name: '관리자A', identifier: 'choir-admin' });
+  admin = r.admin;
+  adminCode = r.code;
+  assert(/^[A-HJ-NP-Z2-9]{4}(-[A-HJ-NP-Z2-9]{4}){2}$/.test(adminCode) && r.recoveryCode, '관리자 코드·명단 복구 코드');
+  await AS.openAdminIfNeeded();
+  eq(AS.role, 'admin', '관리자로 로그인된 상태');
+  pub = createPublisher({ core: A, access: AS.access, getAdmin: async () => admin });
   media = createMedia({ core: A, limit: 1.5e6, read: raw });
   const r1 = await applyPlan(FAKE, { core: A });
   assert(r1.counts.members === 3 && r1.counts.events === 1, `처음: ${JSON.stringify(r1.counts)}`);
-  const r2 = await applyPlan(FAKE, { core: A });
-  eq(r2.counts, {}, '두 번째는 바뀐 것 없음');
+  eq((await applyPlan(FAKE, { core: A })).counts, {}, '두 번째는 바뀐 것 없음');
   eq(A.collection('members').get(ids.member({ name: '김하나' })).phone, '010-1111-2222', '관리자는 연락처를 봄');
 });
 
-await test('가족 코드 발급 (형제는 한 가족) + 스탭 개인 코드 + 반영 → 공개 저장소에는 암호문·평문 공개 페이지만', async () => {
-  const sug = pub.suggestFamilies();
-  eq(sug.map(f => f.login).sort(), ['김하나', '박세찌', '이두리'], '연락처가 다른 세 가족');
-  for (const f of sug) FAM[f.login] = await pub.issue(f);
-  STAFF1 = await pub.issue({ name: '박총무', login: '박총무', role: 'staff', labels: ['총무'] });
-  STAFF2 = await pub.issue({ name: '이회계', login: '이회계', role: 'staff', labels: ['회계'] });
-  await rejects(pub.issue({ name: 'x', login: ' 김하나 ' }), 'dup-login', '같은 로그인 이름');
-  assert(/#\/login\/%EA%B9%80%ED%95%98%EB%82%98/.test(inviteMessage(FAM['김하나'])) && inviteMessage(FAM['김하나']).includes(FAM['김하나'].code), '초대 메시지');
+await test('가족 코드(형제는 한 가족, 이름=아이 이름) + 스탭 개인 코드 + 반영 → 공개 저장소에는 암호문과 평문 공개 페이지만', async () => {
+  const sug = await pub.suggestFamilies();
+  eq(sug.map(f => f.identifier).sort(), ['김하나', '박세찌', '이두리'], '연락처가 다른 세 가족');
+  for (const f of sug) FAM[f.identifier] = await pub.addFamily(f);
+  assert(FAM['김하나'].invitation.includes(FAM['김하나'].code) && FAM['김하나'].invitation.includes('김하나'), '초대 안내문');
+  STAFF1 = await admin.addPerson({ name: '박총무', identifier: '박총무', role: 'staff', labels: ['총무'] });
+  STAFF2 = await admin.addPerson({ name: '이회계', identifier: '이회계', role: 'staff', labels: ['회계'] });
+  await rejects(admin.addPerson({ name: 'x', identifier: ' 김하나 ', role: 'parent' }), 'duplicate', '같은 로그인 이름');
   await A.collection('settings').put({ id: 'public', title: '시험 합창단', intro: '함께 노래해요', join: '입단 문의는 교회 사무실로' });
   const r = await pub.publish();
-  assert(r.files.includes(KEYRING_PATH) && r.files.includes(PUBLIC_PATH) && r.files.includes(STAFF_PATH), `반영 파일 ${r.files}`);
+  for (const k of ['public/site', 'parent/content', 'staff/staff-info', `parent/album-${ids.album(FAKE.albums[0])}`]) assert(r.items.includes(k), `반영 항목 ${k}: ${r.items}`);
   const all = siteAll();
   for (const x of SECRETS) assert(!all.includes(x), `공개 저장소 글자에 "${x}"`);
   for (const x of ['김하나', '이두리', '시험은행', '이웃 초청', 'tok-1', FAM['김하나'].code]) assert(!all.includes(x), `암호화되지 않은 "${x}"`);
-  const pubj = JSON.parse(await siteText(PUBLIC_PATH));
-  eq([pubj.title, pubj.intro], ['시험 합창단', '함께 노래해요'], '공개 페이지는 평문');
-  assert(!JSON.stringify(pubj).includes('이웃 초청') && !pubj.roster && !pubj.events, '공개 페이지에 학부모 내용 없음');
+  const pubIdx = siteJSON(indexPath('public'));
+  eq([pubIdx.items.site.d.title, pubIdx.items.site.d.intro], ['시험 합창단', '함께 노래해요'], '공개 페이지는 평문');
+  assert(!JSON.stringify(pubIdx).includes('이웃 초청'), '공개에 학부모 내용 없음');
+  eq((await pub.state()).dirty, false, '반영 끝');
 });
 
-let F1, F2, S1;
-await test('한 로그인 화면: 가족 코드 → 학부모, 스탭 코드 → 스탭, 관리자 비밀번호(관리자 기기) → 관리자, 틀리면 실패', async () => {
+let F1, S1;
+await test('한 로그인 화면: 가족 코드 → 학부모, 스탭 코드 → 스탭, 관리자 코드 → 관리자(데이터 저장소까지 열림), 틀리면 실패', async () => {
   F1 = mkSession('F1');
   eq(await F1.load(), 'public', '처음엔 공개');
-  await rejects(F1.login('김하나', newAccessCode()), 'bad-login', '틀린 코드');
+  eq(F1.pub.title, '시험 합창단', '공개 페이지는 로그인 없이');
+  await rejects(F1.login('김하나', 'WRNG-CODE-XXXX'), 'bad-login', '틀린 코드');
   await rejects(F1.login('없는아이', FAM['김하나'].code), 'bad-login', '틀린 이름');
   await rejects(F1.login('박세찌', FAM['김하나'].code), 'bad-login', '다른 가족 이름 + 내 코드');
-  eq(await F1.login('김하나', FAM['김하나'].code), 'parent', '가족 코드 → 학부모');
-  assert(!F1.keys.staff && !F1.token && !F1.staff, '학부모에게 스탭 열쇠·토큰 없음');
+  eq(await F1.login('김하나', FAM['김하나'].code.toLowerCase()), 'parent', '가족 코드 → 학부모');
+  assert(!F1.has('staff') && !F1.access.me().canWrite && !F1.staff, '학부모에게 스탭 등급·쓰기 없음');
   eq(F1.bundle.events[0].title, '이웃 초청 음악회', '학부모 내용');
-  const F1b = createSession({ getText: siteText, read: raw, dbName: dbs[dbs.length - 1] });
+  await rejects(F1.access.list('staff'), 'no-access', '스탭 목록은 못 엶');
+  const F1b = mkSession('F1b', null, F1.kvName);
   eq(await F1b.load(), 'parent', '다시 열면 코드 없이');
   S1 = mkSession('S1');
-  eq(await S1.login(' 박총무 ', STAFF1.code.toLowerCase()), 'staff', '스탭 코드 → 스탭');
-  assert(S1.token === 'tok-1' && S1.keys.staff && S1.bundle, '스탭은 쓰기 토큰·스탭 열쇠·학부모 내용');
+  eq(await S1.login(' 박총무 ', STAFF1.code), 'staff', '스탭 코드 → 스탭');
+  assert(S1.access.me().canWrite && S1.staff && S1.bundle, '스탭은 쓰기·스탭 내용·학부모 내용');
   eq(S1.staff.members.find(m => m.name === '김하나').phone, '010-1111-2222', '스탭은 연락처를 봄');
   eq(S1.staff.site.accountHolder, '홍예금', '스탭은 예금주를 봄');
-  // 관리자 기기: 같은 로그인 화면에 관리자 비밀번호
-  await A.lock();
-  const AS = mkSession('AS', A);
-  await rejects(AS.login('관리자A', 'wrong-admin-pw'), 'bad-login', '틀린 관리자 비밀번호');
-  eq(await AS.login('관리자A', ADMIN_PW), 'admin', '관리자 비밀번호 → 관리자');
-  assert(AS.has('staff') && AS.has('parent') && AS.staff && AS.bundle, '관리자는 모든 단계');
-  await AS.logout();
-  eq(AS.role, 'public', '로그아웃 → 공개');
-  await A.open(ADMIN_PW);
+  eq(S1.staff.families.length, 3, '가족 목록');
+  // 관리자: 연결된 적 없는 새 기기에서도 같은 로그인 → 데이터 저장소까지 열림
+  const B = mkCore('B');
+  const AB = mkSession('AB', B);
+  eq(await AB.login('choir-admin', adminCode), 'admin', '관리자 코드 → 관리자');
+  assert(B.status().open && AB.admin && (await AB.admin.people()).length === 6, '데이터 저장소 열림 · 명단');
+  eq(B.collection('members').get(ids.member({ name: '김하나' })).phone, '010-1111-2222', '새 기기에서 관리자 데이터');
+  await AB.logout();
+  eq([AB.role, B.status().open], ['public', false], '로그아웃 → 공개, 데이터 저장소 잠김');
 });
 
-await test('학부모 단계에는 연락처가 없다 (명단은 이름·학년만, 예금주·문의 연락처 없음) · 스탭 단계는 학부모 열쇠로 안 열림', async () => {
+await test('학부모 등급에는 연락처가 없다 (명단은 이름·학년만, 예금주·문의 연락처 없음)', async () => {
   const b = F1.bundle;
   const text = JSON.stringify(b);
   for (const x of SECRETS) assert(!text.includes(x), `학부모 묶음에 "${x}"`);
@@ -165,9 +168,6 @@ await test('학부모 단계에는 연락처가 없다 (명단은 이름·학년
   eq(b.roster.map(m => [m.name, m.grade]), [['김하나', '1'], ['박세찌', '3'], ['이두리', '중1']], '이름·학년 (학년 순)');
   for (const k of ['accountHolder', 'contactName', 'contactPhone']) assert(!(k in b.site), `site.${k}`);
   eq([b.site.bankName, b.site.bankAccount], ['시험은행', '999-0000-1111'], '계좌번호는 보임');
-  let failed = false;
-  try { await openItem(F1.keys.parent, JSON.parse(await siteText(STAFF_PATH)), STAFF_PATH); } catch { failed = true; }
-  assert(failed, '학부모 열쇠로 스탭 내용이 열리면 안 됨');
   await A.collection('members').patch(ids.member({ name: '김하나' }), { secretNew: '비밀칸' });
   const { bundle } = buildBundle(pub.gather());
   assert(!JSON.stringify(bundle).includes('비밀칸'), '허용 목록 밖의 새 칸은 가지 않음');
@@ -188,43 +188,43 @@ await test('연락처가 공지·공개 페이지에 섞이면 반영 거부 →
   assertNoContacts([{ a: '2026-11-11', s: 4325155, w: 1600 }], pub.gather());
 });
 
+let S2;
 await test('스탭: 회의자료(첨부 PDF 바이트 그대로)·간식 당번을 쓰고, 다른 스탭·관리자가 읽음. 같은 때 고치면 합침. 학부모는 못 씀', async () => {
   const st1 = staffStore(S1);
   const pdf = pdfBytes(120e3);
   const att = await st1.attach([new File([pdf], '11월 회의.pdf', { type: 'application/pdf' })]);
-  const m = await st1.put('meetings', { title: '11월 임원 회의', date: '2026-11-08', body: '음악회 준비', attachments: att });
+  await st1.put('meetings', { title: '11월 임원 회의', date: '2026-11-08', body: '음악회 준비', attachments: att });
   await st1.put('snacks', { date: '2026-11-15', who: '김하나 가족', items: '귤 40개', note: '' });
   assert(!siteAll().includes('음악회 준비') && !siteAll().includes('귤 40개'), '공개 저장소에는 암호문');
-  const S2 = mkSession('S2');
+  assert(gh.repos.has('choir-files-1'), '첨부는 파일 저장소 choir-files-1');
+  S2 = mkSession('S2');
   await S2.login('이회계', STAFF2.code);
   const st2 = staffStore(S2);
   const ms = await st2.list('meetings');
   eq(ms.map(x => [x.title, x.createdBy]), [['11월 임원 회의', '박총무']], '다른 스탭이 읽음');
   const got = new Uint8Array(await (await st2.file(ms[0].attachments[0])).arrayBuffer());
   assert(got.length === pdf.length && got.every((b, k) => b === pdf[k]), '첨부 바이트 그대로');
-  // 같은 기록을 두 스탭이 동시에 고침 → 둘 다 남음
   const sn = (await st2.list('snacks'))[0];
   await st1.list('snacks');
   await st1.put('snacks', { ...sn, items: '귤 50개' });
   await st2.put('snacks', { ...sn, note: '현관 앞에' });
   const merged = (await staffStore(S1).list('snacks'))[0];
   eq([merged.items, merged.note], ['귤 50개', '현관 앞에'], '다른 칸은 둘 다');
-  // 관리자도 읽음
-  const AS = mkSession('AS2', A);
-  await AS.load();
   eq((await staffStore(AS).list('meetings')).length, 1, '관리자 읽음');
   await rejects(staffStore(F1).put('snacks', { date: '2026-11-22', who: 'x' }), 'forbidden', '학부모는 쓸 수 없음');
-  await st1.softDelete('snacks', merged);
+  const stx = staffStore(S1);
+  await stx.list('snacks');
+  await stx.softDelete('snacks', merged);
   eq((await st2.list('snacks')).length, 0, '휴지통');
   eq((await st2.list('snacks', { deleted: true })).length, 1, '휴지통에 남음');
-  void m;
 });
 
 let P1;
 await test('학부모: 기억한 기기는 코드 없이 다시 열림', async () => {
   P1 = mkSession('P1');
   await P1.login('박세찌', FAM['박세찌'].code);
-  eq(P1.role, 'parent', '로그인');
+  const P1b = mkSession('P1b', null, P1.kvName);
+  eq(await P1b.load(), 'parent', '코드 없이');
 });
 
 let pdfA, pdfBig;
@@ -334,81 +334,73 @@ await test('올리다 끊기면 이어서: 같은 키·같은 자리로 다시 �
   await createImageBitmap(b);
 });
 
-// ---------- 5. 학부모 비밀번호 바꾸기 ----------
-await test('가족 탈퇴: 그 가족 칸 삭제 + 학부모 열쇠 바꿈 → 탈퇴 가족은 새 내용 못 엶, 남은 가족은 코드 없이 계속', async () => {
-  const oldEnv = JSON.parse(await siteText(CONTENT_PATH));
-  const oldK = F1.keys.parent;
-  const kr0 = JSON.parse(await siteText(KEYRING_PATH));
-  eq(Object.keys(kr0.slots).length, 5, '칸 5개 (가족 3 + 스탭 2)');
-  await pub.revoke(FAM['김하나'].id, '탈퇴');
-  const kr = JSON.parse(await siteText(KEYRING_PATH));
-  eq(Object.keys(kr.slots).length, 4, '칸 4개');
-  assert(!kr.slots[await lookupId(kr.siteSalt, '김하나')], '탈퇴 가족 칸 없음');
-  assert(kr.kid !== kr0.kid, '학부모 열쇠 바뀜');
-  const env = JSON.parse(await siteText(CONTENT_PATH));
-  assert(env.ct !== oldEnv.ct && env.wk.ct !== oldEnv.wk.ct, '새 암호문');
-  let failed = false;
-  try { await openItem(oldK, env, CONTENT_PATH); } catch { failed = true; }
-  assert(failed, '예전 학부모 열쇠로 새 내용이 열리면 안 됨');
-  const alb = ids.album(FAKE.albums[0]);
-  failed = false;
-  try { await openItem(oldK, JSON.parse(await siteText(albumPath(alb))), albumPath(alb)); } catch { failed = true; }
-  assert(failed, '예전 열쇠로 새 앨범 목록이 열리면 안 됨');
-  // 탈퇴 가족의 기억한 기기 → 공개로 돌아감 + 안내
-  const F1c = createSession({ getText: siteText, read: raw, dbName: dbs.find(n => n.endsWith('-F1')) });
+// ---------- 5. 탈퇴 · 그만둠 · 역할 ----------
+await test('가족 탈퇴: admin.revoke → 칸 삭제 + 학부모 열쇠 바꿈(커밋 하나) → 탈퇴 가족은 못 열고, 남은 가족은 코드 없이 계속', async () => {
+  const ring0 = siteJSON(KEYRING);
+  const idx0 = siteJSON(indexPath('parent'));
+  const commits0 = siteRepo.commitLog.length;
+  const r = await admin.revoke(FAM['김하나'].person.id);
+  eq(r.tokenExposed, false, '읽기 역할이라 토큰 걱정 없음');
+  eq(siteRepo.commitLog.length, commits0 + 1, '커밋 하나');
+  const ring = siteJSON(KEYRING);
+  eq(Object.keys(ring.slots).length, Object.keys(ring0.slots).length - 1, '칸 하나 줄어듦');
+  const idx = siteJSON(indexPath('parent'));
+  assert(idx.kv > idx0.kv, '학부모 열쇠 판이 올라감');
+  eq(idx.items.content.r, idx0.items.content.r, '내용 암호문은 그대로 (항목 열쇠만 다시 감쌈)');
+  assert(idx.items.content.k.ct !== idx0.items.content.k.ct, '항목 열쇠는 새 열쇠로');
+  // 탈퇴 가족의 기억한 기기 → 공개로 + 안내
+  const F1c = mkSession('F1c', null, F1.kvName);
   eq(await F1c.load(), 'public', '탈퇴 가족 기기는 공개로');
   assert(/접속이 끝났어요/.test(F1c.notice), '안내 문장');
-  await rejects(F1c.login('김하나', FAM['김하나'].code), 'bad-login', '예전 코드');
-  // 남은 가족(기억한 기기) → 코드 없이 새 열쇠로
-  eq(await P1.load(), 'parent', '남은 가족은 그대로');
-  assert(P1.bundle.albums.length && P1.keys.parent !== oldK, '새 열쇠로 열림');
-  // 가족 기록은 지우지 않음
-  const rec = A.collection('people').get(FAM['김하나'].id);
-  assert(rec && rec.status === 'revoked' && !rec.code && !rec.pk, '기록은 남고 코드·사람 키만 비움');
+  await rejects(mkSession('F1d').login('김하나', FAM['김하나'].code), 'bad-login', '예전 코드');
+  // 남은 가족
+  const P1c = mkSession('P1c', null, P1.kvName);
+  eq(await P1c.load(), 'parent', '남은 가족은 그대로');
+  assert(P1c.bundle?.albums.length, '새 열쇠로 내용이 열림');
+  const ppl = await admin.people();
+  eq(ppl.find(p => p.id === FAM['김하나'].person.id).status, 'revoked', '기록은 남음(탈퇴)');
+  // 다시 가입 = 새 코드
+  const back = await admin.resetCode(FAM['김하나'].person.id);
+  eq(await mkSession('F1e').login('김하나', back.code), 'parent', '다시 가입 후 새 코드로');
+  await admin.revoke(FAM['김하나'].person.id);
 });
 
-await test('스탭 탈퇴: 스탭·학부모 열쇠 모두 바꿈, 스탭 기록은 새 열쇠로 다시 감쌈(내용 그대로), 토큰 바꾸라는 알림', async () => {
-  const oldKs = S1.keys.staff;
-  const rec0 = (await gh.client('tok-1', { repo: 'jayangchoir.github.io' }).tree()).find(f => f.path.startsWith('p/s/meetings/'));
-  const before = JSON.parse(td.decode(gh.repo('jayangchoir.github.io').files.get(rec0.path).bytes));
-  await pub.revoke(STAFF1.id, '스탭 그만둠');
-  const after = JSON.parse(td.decode(gh.repo('jayangchoir.github.io').files.get(rec0.path).bytes));
-  eq(after.ct, before.ct, '내용(ct)은 그대로');
-  assert(after.wk.ct !== before.wk.ct, '항목 키만 다시 감쌈');
-  let failed = false;
-  try { await openItem(oldKs, after, rec0.path); } catch { failed = true; }
-  assert(failed, '예전 스탭 열쇠로 못 엶');
-  const S2b = mkSession('S2b');
-  await S2b.login('이회계', STAFF2.code);
-  eq((await staffStore(S2b).list('meetings'))[0].title, '11월 임원 회의', '남은 스탭은 읽음');
-  const S1b = mkSession('S1b');
-  await rejects(S1b.login('박총무', STAFF1.code), 'bad-login', '그만둔 스탭 코드');
-  const st = await pub.state();
-  eq(st.tokenWarn?.name, '박총무', '토큰 바꾸라는 알림');
-  repo2tok: {
-    gh.tokens.add('tok-2');
-    await A.rotateToken('tok-2');
-    await pub.tokenRotated();
-    eq((await pub.state()).tokenWarn, null, '알림 지움');
-    const S2c = mkSession('S2c');
-    await S2c.login('이회계', STAFF2.code);
-    eq(S2c.token, 'tok-2', '스탭 묶음에 새 토큰');
-  }
+await test('스탭 그만둠: 스탭·학부모 열쇠 바꿈, 토큰 알림 → 토큰 바꾸면 남은 스탭은 새 토큰, 회의자료는 계속 읽힘', async () => {
+  const r = await admin.revoke(STAFF1.person.id);
+  eq(r.tokenExposed, true, '쓰기 역할 → 토큰 바꾸라는 표시');
+  await pub.warnToken('박총무');
+  eq((await pub.state()).tokenWarn?.name, '박총무', '알림');
+  await rejects(mkSession('S1x').login('박총무', STAFF1.code), 'bad-login', '그만둔 스탭 코드');
+  await A.rotateToken('tok-2');
+  await admin.setToken('tok-2');
+  await pub.clearTokenWarn();
+  eq((await pub.state()).tokenWarn, null, '알림 지움');
+  const S2b = mkSession('S2b', null, S2.kvName);
+  await S2b.load();
+  eq(S2b.access.me().bundle.token, 'tok-2', '남은 스탭은 새 토큰');
+  eq((await staffStore(S2b).list('meetings'))[0].title, '11월 임원 회의', '남은 스탭은 회의자료를 읽음');
+  await staffStore(S2b).put('snacks', { date: '2026-11-29', who: '박세찌 가족', items: '빵' });
 });
 
-await test('역할 바꾸기: 가족 → 스탭(같은 코드로 스탭 화면) → 다시 가족(스탭 열쇠 바꿈)', async () => {
+await test('역할 바꾸기: 가족 → 스탭(같은 코드로 스탭 화면) → 다시 가족(스탭 열쇠 바꿈, 토큰 표시)', async () => {
   const f = FAM['박세찌'];
-  await pub.setRole(f.id, 'staff', ['간식']);
-  const s = mkSession('R1');
-  eq(await s.login('박세찌', f.code), 'staff', '같은 코드로 스탭');
-  const ks = s.keys.staff;
-  await pub.setRole(f.id, 'parent');
-  const s2 = mkSession('R2');
-  eq(await s2.login('박세찌', f.code), 'parent', '다시 학부모');
-  eq((await pub.state()).tokenWarn?.name, f.name, '스탭에서 빠지면 토큰 알림');
-  const kr = JSON.parse(await siteText(KEYRING_PATH));
-  assert(A.collection('settings').get('parent').ks !== ks, '스탭 열쇠 바뀜');
-  void kr;
+  await admin.changeRole(f.person.id, 'staff', ['간식']);
+  eq(await mkSession('R1').login('박세찌', f.code), 'staff', '같은 코드로 스탭');
+  const r = await admin.changeRole(f.person.id, 'parent');
+  eq([r.rotated, r.tokenExposed], [['staff'], true], '스탭 열쇠를 바꾸고 토큰 표시');
+  eq(await mkSession('R2').login('박세찌', f.code), 'parent', '다시 학부모');
+});
+
+await test('학부모가 코드를 비밀문장으로: 요청 글자(비밀문장 없음) → 관리자 적용 → 새 비밀문장으로 로그인, 예전 코드는 안 됨', async () => {
+  const f = FAM['이두리'];
+  const s = mkSession('CS');
+  await s.login('이두리', f.code);
+  await rejects(s.access.changeSecret(f.code, '20150304'), 'weak-passphrase', '생일 같은 숫자');
+  const r = await s.access.changeSecret(f.code, '우리 아이 웃음소리 2026');
+  assert(r.request?.startsWith('ACX1.') && !r.request.includes('웃음소리'), '요청 글자에 비밀문장 없음');
+  await admin.applySecretChange(r.request);
+  eq(await mkSession('CS2').login('이두리', '우리 아이 웃음소리 2026'), 'parent', '새 비밀문장');
+  await rejects(mkSession('CS3').login('이두리', f.code), 'bad-login', '예전 코드');
 });
 
 // ---------- 6. 노션 zip ----------

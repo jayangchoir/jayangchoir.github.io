@@ -31,9 +31,11 @@ async function run(tag, w, h, mobile) {
   // 처음 설정
   await page.waitFor('document.querySelector("#f-setup")');
   await page.eval(`(() => { const v = (s, x) => { document.querySelector(s).value = x; };
-    v('#s-token', 'demo-token'); v('#s-pw', 'admin-pass-2026'); v('#s-pw2', 'admin-pass-2026'); v('#s-name', '총무');
+    v('#s-token', 'demo-token'); v('#s-pw', 'data-pass-2026'); v('#s-pw2', 'data-pass-2026'); v('#s-name', '총무'); v('#s-id', 'choir-admin');
     document.querySelector('#f-setup').requestSubmit(); })()`);
   await page.waitFor('document.querySelector("#rc-ok")', 30000);
+  { const p = join(outDir, `${tag}-admin-setup-codes.png`); await new Promise(r => setTimeout(r, 400)); await page.shot(p, { full: false }); shots.push(p); }
+  const adminCode = await page.eval(`document.querySelector('.code-box').textContent.split('/')[1].trim()`);
   await page.eval(`document.querySelector('#rc-ok').click(); document.querySelector('#rc-close').click();`);
   await page.waitFor('document.querySelector(".admin-tabs")');
   // 준비된 자료
@@ -59,26 +61,36 @@ async function run(tag, w, h, mobile) {
     await ctx.uploads.kick();
   })()`);
   await page.waitFor('window.__demo.ctx.uploads.snapshot().siteDone === 10', 60000);
-  // 가족 코드(명단으로) + 예시 스탭 코드 → 반영
-  await page.eval(`(async () => { const ctx = window.__demo.ctx;
-    for (const f of ctx.pub.suggestFamilies()) await ctx.pub.issue(f);
-    await ctx.pub.issue({ name: '(예시) 스탭', login: '예시스탭', role: 'staff', labels: ['총무'] });
-    await ctx.pub.publish(); await ctx.session.refreshAdmin(); ctx.render(); })()`);
+  // 가족 코드(명단으로) + 예시 스탭 코드 → 반영 (코드는 이때 한 번만 나온다)
+  const made = await page.eval(`(async () => { const ctx = window.__demo.ctx; const out = [];
+    for (const f of await ctx.pub.suggestFamilies()) { const r = await ctx.pub.addFamily(f); out.push({ login: r.person.identifier, code: r.code }); }
+    const st = await ctx.session.admin.addPerson({ name: '(예시) 스탭', identifier: '예시스탭', role: 'staff', labels: ['총무'] });
+    await ctx.pub.publish(); await ctx.session.loadContent(); ctx.render();
+    return { fams: out, staff: { login: '예시스탭', code: st.code } }; })()`);
   await go('#/admin');
-  await page.waitFor('document.querySelector(".publish-bar.ok")', 60000);
+  try { await page.waitFor('document.querySelector(".publish-bar.ok")', 60000); } catch (e) {
+    console.log('DEBUG', await page.eval(`window.__demo.ctx.pub.state().then(s => JSON.stringify(s))`), await page.eval('document.querySelector("#view").innerText.slice(0, 600)'), page.problems);
+    throw e;
+  }
   await shot('admin-dashboard');
   await go('#/admin/access');
-  await page.waitFor('document.querySelector("[data-inv]")');
+  await page.waitFor('document.querySelector("[data-more]")');
   await shot('admin-access');
-  await page.eval(`document.querySelector('[data-inv]').click()`);
-  await page.waitFor('document.querySelector("#inv")');
+  // 한 가족의 "새 코드" → 안내문 (한 번만 보임)
+  await page.eval(`document.querySelector('[data-more]').click()`);
+  await page.waitFor('document.querySelector("#modal [data-close=reset]")');
+  await page.eval(`document.querySelector('#modal [data-close=reset]').click()`);
+  await page.waitFor('document.querySelector("#modal [data-close=yes]")');
+  await page.eval(`document.querySelector('#modal [data-close=yes]').click()`);
+  await page.waitFor('document.querySelector("#cp-all")', 60000);
   { const p = join(outDir, `${tag}-admin-invite.png`); await new Promise(r => setTimeout(r, 500)); await page.shot(p, { full: false }); shots.push(p); }
+  const resetLogin = await page.eval(`document.querySelector('#modal pre').textContent.match(/아이디: (.+)/)?.[1]?.trim() || ''`);
   await page.eval(`document.querySelector('#modal [data-close]').click()`);
+  const fam = made.fams.find(f => f.login !== resetLogin);
+  const stf = made.staff;
   await go('#/admin/members');
   await page.waitFor('document.querySelector(".mcards, table.tbl")');
   await shot('admin-roster');
-  const fam = await page.eval(`(() => { const p = window.__demo.core.collection('people').list().find(x => x.role === 'parent'); return { login: p.login, code: p.code }; })()`);
-  const stf = await page.eval(`(() => { const p = window.__demo.core.collection('people').list().find(x => x.role === 'staff'); return { login: p.login, code: p.code }; })()`);
   // 로그아웃 → 공개 첫 화면
   await go('#/logout');
   await page.waitFor('location.hash === "#/" && document.querySelector(".pub-hero")', 20000);
@@ -140,7 +152,7 @@ async function run(tag, w, h, mobile) {
   await page.eval(`document.querySelector('#lpw').value = ${JSON.stringify(stf.code)}; document.querySelector('#login-form').requestSubmit();`);
   await page.waitFor('location.hash === "#/home"', 20000);
   await page.eval(`(async () => { const ctx = window.__demo.ctx; const { createStaffStore } = await import('./js/staff.js');
-    const st = createStaffStore({ session: ctx.session, backendFor: (t, d) => window.__demo.gh.client(t, d) });
+    const st = createStaffStore({ access: ctx.session.access });
     const pdf = new TextEncoder().encode('%PDF-1.4 (예시) 회의 자료');
     const att = await st.attach([new File([pdf], '(예시) 11월 회의 안건.pdf', { type: 'application/pdf' })]);
     await st.put('meetings', { title: '(예시) 11월 스탭 회의', date: '2026-11-08', body: '이웃 초청 음악회 준비\\n· 단복 점검\\n· 간식 당번 정하기', attachments: att });
@@ -157,12 +169,12 @@ async function run(tag, w, h, mobile) {
   await shot('staff-snacks');
   const stxt = await page.eval('document.body.innerText');
   if (!/010[-\s]?\d{3,4}/.test(stxt) && !/010/.test(await page.eval(`(async () => { location.hash = '#/staff'; await new Promise(r => setTimeout(r, 600)); return document.body.innerText; })()`))) { console.log(`[${tag}] ✕ 스탭에게 연락처가 안 보여요`); bad++; }
-  // 관리자도 같은 로그인 화면에서 (관리자 비밀번호)
+  // 관리자도 같은 로그인 화면에서 (관리자 코드)
   await go('#/logout');
   await page.waitFor('location.hash === "#/"', 20000);
   await go('#/login');
   await page.waitFor('document.querySelector("#login-form")');
-  await page.eval(`document.querySelector('#lid').value = '총무'; document.querySelector('#lpw').value = 'admin-pass-2026'; document.querySelector('#login-form').requestSubmit();`);
+  await page.eval(`document.querySelector('#lid').value = 'choir-admin'; document.querySelector('#lpw').value = ${JSON.stringify(adminCode)}; document.querySelector('#login-form').requestSubmit();`);
   await page.waitFor('location.hash === "#/admin" && document.querySelector(".admin-tabs")', 20000);
   const probs = page.problems.filter(p => !/i\.ytimg\.com/.test(p));
   if (page.problems.length) console.log(`[${tag}] 문제:\n  ${page.problems.join('\n  ')}`);

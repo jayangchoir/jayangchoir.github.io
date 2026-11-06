@@ -1,109 +1,73 @@
-// 스탭 기록 — 회의자료(첨부 포함)·간식 당번. 스탭과 관리자가 쓴다.
+// 스탭 기록 — 회의자료(첨부 포함)·간식 당번. 스탭과 관리자가 쓴다 (공유 모듈 access.js 의 스탭 등급 항목).
 //
-// 기록마다 파일 하나: 공개 사이트 저장소 p/s/<목록>/<id>.json = 항목 키로 암호화, 항목 키는 스탭 키 K_staff 로 감쌈 (tier.js sealItem).
-// 쓰기는 스탭 묶음에 든 GitHub 토큰으로 (관리자는 core 의 토큰). 같은 기록을 두 사람이 동시에 고치면 merge.js 로 합친다
-// (같은 칸이면 나중 것 + 진 값은 _conflicts). 지우기는 휴지통(deletedAt)뿐.
-// 첨부 파일은 사진 저장소(choir-photos-N)에 파일마다 다른 키로 암호화해 두고, 그 키는 기록 안(스탭만 열 수 있음)에만 있다.
+//   회의자료 'mtg-<id>'   { kind: 'meeting', title, date, body, attachments: [{ id, name, type, size }], by… }
+//   간식     'snk-<id>'   { kind: 'snack', date, who, items, note, by… }
+//   첨부     access.publishFile(…, { tier: 'staff' }) → 파일 저장소 choir-files-N (암호화), 회의자료에는 그 항목 id 만
+// 같은 기록을 두 사람이 같은 때 고치면 merge.js 로 칸마다 합친다 (같은 칸이면 나중 것 + 진 값은 _conflicts).
+// 지우기는 휴지통(access.unpublish)뿐 — 되살릴 수 있다.
 
-import { GitHubBackend, isConflict } from './core/github.js';
 import { mergeRecord, sameContent } from './core/merge.js';
 import { uid } from './core/core.js';
-import { sealItem, openItem, staffRecPath, newFileKey, fileKey, encPart } from './tier.js';
-import { CHUNK, OWNER, repoName, readEntry } from './media.js';
-import { SITE_REPO } from './publish.js';
 
-export const STAFF_COLS = ['meetings', 'snacks'];
+export const PREFIX = { meetings: 'mtg-', snacks: 'snk-' };
+const KIND = { meetings: 'meeting', snacks: 'snack' };
 
-export function createStaffStore({ session, backendFor = (token, dev) => new GitHubBackend({ token, ...dev }), site = SITE_REPO }) {
-  const guard = () => { if (!session.token || !session.keys.staff) throw Object.assign(new Error('스탭만 쓸 수 있어요.'), { code: 'forbidden' }); };
-  const be = () => {
-    guard();
-    return backendFor(session.token, { ...site, branch: 'main' });
-  };
-  const cache = new Map(); // 경로 → { sha, rec }
-  const who = () => session.person?.name || '스탭';
+export function createStaffStore({ access }) {
+  const guard = () => { if (!access.me()?.canWrite || !access.canSee('staff')) throw Object.assign(new Error('스탭만 쓸 수 있어요.'), { code: 'forbidden' }); };
+  const seen = new Map(); // id → 마지막으로 읽은 내용 (합칠 때 기준)
+  const who = () => access.me()?.name || '스탭';
   const now = () => new Date().toISOString();
 
-  async function read(path, sha) {
-    const c = cache.get(path);
-    if (c && c.sha === sha) return c.rec;
-    const got = await be().get(path);
-    if (!got) return null;
-    const rec = await openItem(session.keys.staff, JSON.parse(new TextDecoder().decode(got.bytes)), path);
-    cache.set(path, { sha: got.sha, rec });
-    return rec;
-  }
-
-  // → 기록들 (deleted: false 기본, true 면 휴지통만, 'all')
+  // → 기록들 (deleted: false | true | 'all')
   async function list(col, { deleted = false } = {}) {
-    guard();
-    const pre = `p/s/${col}/`;
+    if (!access.canSee('staff')) throw Object.assign(new Error('스탭만 볼 수 있어요.'), { code: 'forbidden' });
     const out = [];
-    for (const f of await be().tree()) {
-      if (!f.path.startsWith(pre) || !f.path.endsWith('.json')) continue;
-      try { const r = await read(f.path, f.sha); if (r) out.push(r); } catch (e) { console.warn('[staff] 못 연 기록', f.path, e); }
+    for (const it of await access.list('staff', { deleted })) {
+      if (!it.id.startsWith(PREFIX[col]) || !it.data) continue;
+      const rec = { ...it.data, id: it.id, deletedAt: it.deletedAt || null };
+      seen.set(it.id, rec);
+      out.push(rec);
     }
-    return out.filter(r => (deleted === 'all' ? true : deleted ? !!r.deletedAt : !r.deletedAt));
+    return out;
   }
 
   async function put(col, rec) {
     guard();
-    const id = rec.id || uid();
-    const path = staffRecPath(col, id);
-    const prev = cache.get(path);
-    const base = prev?.rec;
+    const id = rec.id || `${PREFIX[col]}${uid()}`;
+    const base = seen.get(id);
     if (base && sameContent(base, rec)) return base;
-    let next = { ...rec, id, createdAt: base?.createdAt || now(), createdBy: base?.createdBy || who(), updatedAt: now(), updatedBy: who(), deletedAt: rec.deletedAt ?? base?.deletedAt ?? null, deletedBy: rec.deletedBy ?? base?.deletedBy ?? null };
-    let sha = prev?.sha || null;
-    for (let i = 0; i < 5; i++) {
-      const env = await sealItem(session.keys.staff, next, path, 'staff');
-      try {
-        const nsha = await be().put(path, new TextEncoder().encode(JSON.stringify(env)), sha, `스탭 ${col}`);
-        cache.set(path, { sha: nsha, rec: next });
-        return next;
-      } catch (e) {
-        if (!isConflict(e)) throw e;
-        // 다른 분이 먼저 고쳤음 → 받아서 합친 뒤 다시
-        const got = await be().get(path);
-        if (!got) { sha = null; continue; }
-        const remote = await openItem(session.keys.staff, JSON.parse(new TextDecoder().decode(got.bytes)), path);
-        // 부른 쪽이 고친 것이 바로 이 최신본이면 그것이 기준(덮어써도 됨), 아니면 이 기기가 마지막으로 본 것이 기준
-        next = mergeRecord(rec.updatedAt && rec.updatedAt === remote.updatedAt ? remote : base, next, remote);
-        sha = got.sha;
-      }
+    const body = { ...rec };
+    delete body.deletedAt;
+    delete body.deletedBy;
+    let next = { ...body, id, kind: KIND[col], createdAt: base?.createdAt || rec.createdAt || now(), createdBy: base?.createdBy || rec.createdBy || who(), updatedAt: now(), updatedBy: who() };
+    // 그사이 다른 분이 고쳤으면 칸마다 합친다
+    if (base) {
+      const cur = (await access.list('staff', { deleted: 'all' })).find(i => i.id === id)?.data;
+      if (cur && cur.updatedAt !== base.updatedAt) next = mergeRecord(rec.updatedAt === cur.updatedAt ? cur : base, next, { ...cur, id });
     }
-    throw new Error('다른 분과 동시에 고치느라 저장하지 못했어요. 다시 해 주세요.');
+    delete next.deletedAt;
+    delete next.deletedBy;
+    await access.publish({ id, tier: 'staff', data: next });
+    seen.set(id, next);
+    return next;
   }
 
-  const softDelete = async (col, rec) => put(col, { ...rec, deletedAt: now(), deletedBy: who() });
-  const restore = async (col, rec) => put(col, { ...rec, deletedAt: null, deletedBy: null });
+  const softDelete = async (col, rec) => { guard(); await access.unpublish(rec.id, 'staff'); };
+  const restore = async (col, rec) => { guard(); await access.restore(rec.id, 'staff'); };
 
-  // 첨부 올리기 → [{ id, n, t, s, r, p, c, k }]
+  // 첨부 올리기 → [{ id, name, type, size }]
   async function attach(files, onProgress) {
     guard();
-    const n = session.staff?.repo || 1;
     const out = [];
     let i = 0;
     for (const f of files) {
-      if (f.size > 95e6) throw new Error(`${f.name}: 95MB 보다 큰 파일은 올릴 수 없어요.`);
-      const id = uid();
-      const k = newFileKey();
-      const key = await fileKey(k);
-      const bytes = new Uint8Array(await f.arrayBuffer());
-      const parts = Math.max(1, Math.ceil(bytes.length / CHUNK));
-      const d = new Date();
-      const p = `m/${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}/${id}`;
-      const pbe = backendFor(session.token, { owner: OWNER, repo: repoName(n), branch: 'main' });
-      for (let j = 0; j < parts; j++) {
-        await pbe.put(`${p}/${j}`, await encPart(key, id, j, bytes.subarray(j * CHUNK, (j + 1) * CHUNK)), null, 'file');
-        onProgress?.((i + (j + 1) / parts) / files.length);
-      }
-      out.push({ id, n: f.name, t: f.type || '', s: bytes.length, r: n, p, c: parts, k });
-      i++;
+      const r = await access.publishFile(f, { tier: 'staff', name: f.name, type: f.type, data: { kind: 'attachment' } });
+      out.push({ id: r.id, name: f.name, type: f.type || '', size: f.size });
+      onProgress?.(++i / files.length);
     }
     return out;
   }
-  const file = (e, onProgress) => readEntry(e.id, e, session.read, onProgress);
+  const file = a => access.file(a.id, 'staff');
 
   return { list, put, softDelete, restore, attach, file };
 }

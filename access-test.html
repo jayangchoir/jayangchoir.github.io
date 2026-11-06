@@ -1,0 +1,481 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>access 시험</title>
+  <style>
+    :root { color-scheme: light dark; --ok: #1a7f37; --bad: #cf222e; }
+    body { font: 14px/1.5 system-ui, sans-serif; margin: 16px; max-width: 900px; background: Canvas; color: CanvasText; }
+    h1 { font-size: 18px; }
+    li { margin: 2px 0; }
+    .ok { color: var(--ok); }
+    .bad { color: var(--bad); font-weight: 600; }
+    pre { white-space: pre-wrap; font-size: 12px; opacity: .8; }
+    #summary { font-size: 16px; font-weight: 700; }
+    #ui { margin-top: 24px; }
+    iframe { width: 100%; height: 160px; border: 1px solid #8884; }
+  </style>
+</head>
+<body>
+  <h1>js/core/access 시험 — 가짜 GitHub로 (등급 · 코드 · 막기 · 파일 저장소)</h1>
+  <p>역할마다 보이는 등급 · 물려받기 · 틀린 코드 · 막기(열쇠 바꾸기, 커밋 하나) · 쓰기 토큰 · 파일 · files-2 넘어가기 · keyring 에 아이디 없음 · 약한 비밀문장 · 예전 core 시험. 실제 GitHub에는 연결하지 않는다.</p>
+  <p id="summary">시험 중…</p>
+  <ol id="out"></ol>
+  <pre id="log"></pre>
+  <div id="ui"></div>
+<script type="module">
+import * as C from './js/core/crypto.js';
+import { createCore } from './js/core/core.js';
+import { FakeGitHub } from './js/core/fake-backend.js';
+import * as A from './js/core/access.js';
+import * as UI from './js/core/access-ui.js';
+
+const out = document.getElementById('out');
+const results = [];
+function report(name, ok, detail = '') {
+  results.push({ name, ok, detail });
+  const li = document.createElement('li');
+  li.className = ok ? 'ok' : 'bad';
+  li.textContent = `${ok ? 'PASS' : 'FAIL'} ${name}${detail ? ' — ' + detail : ''}`;
+  out.append(li);
+}
+function assert(cond, msg) { if (!cond) throw new Error(msg); }
+const eq = (a, b, msg) => assert(JSON.stringify(a) === JSON.stringify(b), `${msg}: ${JSON.stringify(a)} ≠ ${JSON.stringify(b)}`);
+async function rejects(p, code, msg) {
+  try { await (typeof p === 'function' ? p() : p); } catch (e) { assert(!code || e.code === code, `${msg}: 오류 코드 ${e.code} (기대 ${code}) ${e.message}`); return e; }
+  throw new Error(`${msg}: 오류가 나야 하는데 안 났어요`);
+}
+async function test(name, fn) {
+  const t0 = performance.now();
+  try { await fn(); report(name, true, `${Math.round(performance.now() - t0)}ms`); }
+  catch (e) { console.error(e); report(name, false, e.message || String(e)); }
+}
+
+// ---------- 가짜 GitHub: 비공개 데이터 저장소 + 공개 사이트 저장소 (+ 파일 저장소는 쓰기 토큰이 만든다) ----------
+const RUN = Date.now().toString(36);
+const dbs = [];
+const gh = new FakeGitHub({ owner: 'jayangchild', tokens: ['core-tok', 'pub-tok', 'pub-tok-2'], creators: ['pub-tok', 'pub-tok-2'] });
+const dataRepo = gh.repo('jayangchild-data', { isPublic: false });
+const site = gh.repo('jayangchild.github.io', { isPublic: true });
+site.files.set('index.html', { sha: 'sha0', bytes: C.utf8('<!doctype html>') });
+site.addCommit('init', ['index.html']);
+
+const ROLES = [
+  { id: 'public' },
+  { id: 'parent', inherits: ['public'] },
+  { id: 'teacher', inherits: ['parent'] },
+  { id: 'officer', inherits: ['teacher'], write: true, labels: ['부장', '부감', '총무', '회계', '서기'] },
+  { id: 'admin', inherits: ['officer'], write: true },
+];
+const CFG = { site: 'jayangchild', title: '자양교회 유년부', owner: 'jayangchild', repo: 'jayangchild.github.io', siteUrl: 'https://jayangchild.github.io/', roles: ROLES, files: { limit: 40000 } };
+const CORE_PW = 'jayang-yunyeon-2026';
+
+function device(tag) {
+  const kvName = `ax-test-${RUN}-${tag}`;
+  dbs.push(kvName);
+  return A.createAccess(CFG, { reader: gh.reader(CFG.repo), backendFor: (token, r) => gh.client(token, r.repo), kvName });
+}
+function coreDevice(tag) {
+  const dbName = `ax-core-${RUN}-${tag}`;
+  dbs.push(dbName);
+  return createCore({ dbName, backend: token => dataRepo.client(token), autoSync: false, siteUrl: CFG.siteUrl, user: tag });
+}
+const siteText = p => (site.files.get(p) ? C.unutf8(site.files.get(p).bytes) : '');
+const siteJSON = p => JSON.parse(siteText(p));
+const titles = list => list.map(x => x.data?.title).filter(Boolean).sort();
+
+let CA; let AX; let admin; let adminCode; let recoveryCode;
+const P = {}; // 사람: { id, code, person }
+const pub = {}; // 올린 항목 id
+
+// ---------- 1. 역할 ----------
+await test('역할: 설정으로 정의 · 물려받기 · 쓰기 역할 · 잘못된 설정 거부', async () => {
+  const R = A.defineRoles(ROLES);
+  eq(R.closure('parent'), ['public', 'parent'], '학부모');
+  eq(R.closure('officer'), ['public', 'parent', 'teacher', 'officer'], '임원');
+  eq(R.tiersOf('admin'), ['parent', 'teacher', 'officer', 'admin'], '관리자 열쇠');
+  eq(R.tiersOf('public'), [], '공개는 열쇠 없음');
+  eq([R.canWrite('teacher'), R.canWrite('officer'), R.canWrite('admin')], [false, true, true], '쓰기');
+  eq([R.adminId, R.name('teacher'), R.display('officer', ['총무'])], ['admin', '선생님', '임원 (총무)'], '이름');
+  const D = A.defineRoles([{ id: 'public' }, { id: 'a' }, { id: 'b' }, { id: 'c', inherits: ['a', 'b'] }, { id: 'admin', inherits: ['c'] }]);
+  eq(D.closure('c'), ['public', 'a', 'b', 'c'], '여러 역할 물려받기');
+  eq(D.lost('c', 'a'), ['b', 'c'], '역할을 낮추면 잃는 등급');
+  await rejects(() => A.defineRoles([{ id: 'public' }, { id: 'a', inherits: ['b'] }, { id: 'b', inherits: ['a'] }, { id: 'admin' }]), 'bad-roles', '돌고 도는 역할');
+  await rejects(() => A.defineRoles([{ id: 'public' }, { id: 'a', inherits: ['zz'] }, { id: 'admin' }]), 'bad-roles', '없는 역할');
+  await rejects(() => A.defineRoles([{ id: 'a' }, { id: 'admin' }]), 'bad-roles', 'public 없음');
+});
+
+// ---------- 2. 코드 · 비밀문장 ----------
+await test('코드 60비트 · 약한 비밀문장 거부 · 가져온 번호 40비트 확인', async () => {
+  const codes = new Set();
+  for (let i = 0; i < 500; i++) {
+    const c = A.newAccessCode();
+    assert(/^[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}-[A-HJ-NP-Z2-9]{4}$/.test(c), `코드 모양 ${c}`);
+    codes.add(c);
+  }
+  eq(codes.size, 500, '겹치지 않음');
+  assert(A.ACCESS_CODE_BITS >= 60, '60비트 이상');
+  eq(A.normAccessCode(' k7qx m2pa-9trd '), 'K7QXM2PA9TRD', '코드 정리');
+  for (const w of ['20150304', '2015-03-04', '1234567890', '010-1234-5678', 'aaaaaaaaaaaa', 'password12', 'abcdefghijk', '짧은비밀', 'qwer1234!!']) {
+    await rejects(() => A.checkPassphrase(w), 'weak-passphrase', `약한 비밀문장 "${w}"`);
+  }
+  await rejects(() => A.checkPassphrase('kimcheolsu-2015', { identifier: 'kimcheolsu' }), 'weak-passphrase', '아이디가 들어간 것');
+  assert(A.checkPassphrase('blue-river-sings-7'), '좋은 비밀문장');
+  assert(A.checkPassphrase('우리 아이 웃음소리 2026'), '한글 비밀문장');
+  assert(A.codeBits('123456') < A.MIN_CODE_BITS, '6자리 번호는 약함');
+  assert(A.codeBits('48213958271049582') >= A.MIN_CODE_BITS, '17자리 번호는 충분');
+  eq(await A.lookupId('s', '010-1111 2222'), await A.lookupId('s', '01011112222'), '아이디 정리 후 같은 자리');
+});
+
+// ---------- 3. 처음 설정 ----------
+await test('설정: core 를 연 관리자가 setup → 관리자 코드 · 명단 복구 코드 · keyring · 등급 목록', async () => {
+  CA = coreDevice('admin');
+  await CA.setup('core-tok', CORE_PW);
+  AX = device('admin');
+  await rejects(() => AX.setup(coreDevice('locked'), { token: 'pub-tok', identifier: 'x' }), 'vault-locked', '닫힌 core');
+  const r = await AX.setup(CA, { token: 'pub-tok', name: '이관리', identifier: 'yunyeon-admin' });
+  admin = r.admin;
+  adminCode = r.code;
+  recoveryCode = r.recoveryCode;
+  assert(/^[A-Z2-9-]{14}$/.test(adminCode), `관리자 코드 ${adminCode}`);
+  eq([AX.me().role, AX.me().isAdmin, AX.me().canWrite], ['admin', true, true], '관리자로 들어와 있음');
+  assert(site.files.has('keyring.json'), 'keyring.json');
+  for (const t of ['parent', 'teacher', 'officer', 'admin']) eq(siteJSON(`access/${t}/index.json`).kv, 1, `${t} 목록 열쇠 판 1`);
+  const vaultText = JSON.stringify([...CA.collection('accessPeople').list(), ...CA.collection('accessSys').list()]);
+  assert(!vaultText.includes('이관리') && !vaultText.includes('yunyeon-admin') && !vaultText.includes('pub-tok'), '비공개 저장소 안에서도 명단은 관리자 열쇠로 한 번 더 잠김');
+  await rejects(() => device('again').setup(CA, { token: 'pub-tok', identifier: 'x' }), 'already-setup', '두 번 설정 안 됨');
+});
+
+// ---------- 4. 사람 추가 · 등급마다 올리기 ----------
+await test('사람 추가(코드 생성·안내문) · 등급마다 올리기 · 같은 아이디 거부', async () => {
+  const add = async (key, o) => {
+    const r = await admin.addPerson(o);
+    P[key] = { id: r.person.id, code: r.code, ident: o.identifier, name: o.name };
+    assert(r.invitation.includes(r.code) && r.invitation.includes(o.identifier) && r.invitation.includes('다른 사람에게 보내지'), '안내문');
+    return r;
+  };
+  await add('p1', { name: '김학부모', identifier: '010-1111-2222', role: 'parent' });
+  await add('p2', { name: '이학부모', identifier: 'lee-family-parent', role: 'parent' });
+  await add('t1', { name: '박선생님', identifier: 'park-teacher-01', role: 'teacher' });
+  const o1 = await add('o1', { name: '최총무님', identifier: 'choi-officer-01', role: 'officer', labels: ['총무'] });
+  eq(o1.person.roleLabel, '임원 (총무)', '직분 표시');
+  await add('o2', { name: '정서기님', identifier: 'jung-officer-02', role: 'officer', labels: ['서기'] });
+  await rejects(() => admin.addPerson({ name: '또김', identifier: '01011112222', role: 'parent' }), 'duplicate', '같은 아이디');
+  await rejects(() => admin.addPerson({ name: '약한번호', identifier: 'cust-1', role: 'parent', code: '123456' }), 'weak-code', '가져온 약한 번호');
+  await rejects(() => admin.addPerson({ name: 'x', identifier: 'x1', role: 'officer', labels: ['목사'] }), 'bad-label', '없는 직분');
+  eq((await admin.people()).length, 6, '명단 6명');
+  pub.public = (await AX.publish({ tier: 'public', data: { title: '공개 소식' } })).id;
+  pub.parent = (await AX.publish({ tier: 'parent', data: { title: '학부모 사진첩' } })).id;
+  pub.teacher = (await AX.publish({ tier: 'teacher', data: { title: '선생님 명단' } })).id;
+  pub.officer = (await AX.publish({ tier: 'officer', data: { title: '임원회의 자료' } })).id;
+  pub.admin = (await AX.publish({ tier: 'admin', data: { title: '관리자 백업' } })).id;
+  assert(siteText('access/public/index.json').includes('공개 소식'), '공개는 평문');
+  for (const t of ['parent', 'teacher', 'officer', 'admin']) assert(!/사진첩|명단|임원회의|백업/.test(siteText(`access/${t}/index.json`)), `${t} 목록은 암호문`);
+});
+
+// ---------- 5. keyring ----------
+await test('keyring.json 에 아이디·이름·역할·직분·토큰이 평문으로 없음', async () => {
+  const ring = siteText('keyring.json');
+  const words = [];
+  for (const p of Object.values(P)) words.push(p.ident, A.normIdentifier(p.ident), p.name);
+  words.push('yunyeon-admin', 'yunyeonadmin', '이관리', 'parent', 'teacher', 'officer', '총무', '서기', 'pub-tok', '"role"', '"name"');
+  for (const w of words) assert(!ring.includes(w), `keyring 에 "${w}"`);
+  const j = JSON.parse(ring);
+  eq(Object.keys(j.slots).length, 6, '자리 6개');
+  for (const [lid, s] of Object.entries(j.slots)) {
+    assert(/^[0-9a-f]{64}$/.test(lid), '자리 이름은 해시');
+    eq(Object.keys(s).sort(), ['at', 'b', 'i', 's', 't', 'w'], '자리 모양');
+    eq(s.i, 600000, 'PBKDF2 60만 회');
+  }
+});
+
+// ---------- 6. 역할마다 보이는 등급 ----------
+const DEV = {};
+await test('역할마다 정확히 자기 등급만 보임 (물려받기 포함)', async () => {
+  const expect = {
+    p1: { tiers: ['public', 'parent'], titles: ['공개 소식', '학부모 사진첩'] },
+    t1: { tiers: ['public', 'parent', 'teacher'], titles: ['공개 소식', '선생님 명단', '학부모 사진첩'] },
+    o1: { tiers: ['public', 'parent', 'teacher', 'officer'], titles: ['공개 소식', '선생님 명단', '임원회의 자료', '학부모 사진첩'] },
+  };
+  for (const [k, ex] of Object.entries(expect)) {
+    DEV[k] = device(k);
+    const r = await DEV[k].login(P[k].ident, P[k].code);
+    eq(r.tiers, ex.tiers, `${k} 등급`);
+    eq(Object.keys(r.bundle.keys), ex.tiers.filter(t => t !== 'public'), `${k} 꾸러미 열쇠`);
+    eq(titles(await DEV[k].listAll()), ex.titles.slice().sort(), `${k} 보이는 글`);
+    for (const t of ['parent', 'teacher', 'officer', 'admin'].filter(t => !ex.tiers.includes(t))) await rejects(() => DEV[k].list(t), 'no-access', `${k} 가 ${t}`);
+  }
+  eq(titles(await AX.listAll()), ['공개 소식', '관리자 백업', '선생님 명단', '임원회의 자료', '학부모 사진첩'], '관리자는 전부');
+  const anon = device('anon');
+  eq(titles(await anon.list('public')), ['공개 소식'], '로그인 없이 공개');
+  await rejects(() => anon.list('parent'), 'locked', '로그인 없이 학부모');
+  eq(DEV.p1.me().role, 'parent', '역할은 자리가 정함 (고르지 않음)');
+});
+
+await test('틀린 코드 · 없는 아이디 → 실패, 대소문자·띄어쓰기·- 는 상관없음', async () => {
+  const d = device('wrong');
+  await rejects(() => d.login(P.p1.ident, P.p2.code), 'bad-login', '남의 코드');
+  await rejects(() => d.login(P.p1.ident, 'AAAA-BBBB-CCCC'), 'bad-login', '틀린 코드');
+  await rejects(() => d.login('nobody-here', P.p1.code), 'bad-login', '없는 아이디');
+  await rejects(() => d.login('', ''), 'bad-login', '빈칸');
+  eq(d.me(), null, '들어가지 않음');
+  const r = await d.login('010 1111 2222', P.p1.code.toLowerCase().replace(/-/g, ' '));
+  eq(r.role, 'parent', '정리해서 맞음');
+});
+
+await test('쓰기 역할 꾸러미에만 토큰, 읽기 역할 꾸러미에는 절대 없음', async () => {
+  eq([DEV.o1.me().bundle.token, DEV.o1.me().canWrite], ['pub-tok', true], '임원');
+  eq(AX.me().bundle.token, 'pub-tok', '관리자');
+  for (const k of ['p1', 't1']) {
+    const b = DEV[k].me().bundle;
+    assert(!('token' in b) && !JSON.stringify(b).includes('pub-tok') && !b.am && !b.vault, `${k} 꾸러미에 토큰·관리자 열쇠 없음`);
+  }
+  assert(!DEV.o1.me().bundle.am && !DEV.o1.me().bundle.vault, '임원 꾸러미에 관리자 열쇠·데이터 열쇠 없음');
+  await rejects(() => DEV.p1.publish({ tier: 'parent', data: { title: 'x' } }), 'read-only', '학부모는 못 올림');
+  await rejects(() => DEV.t1.unpublish(pub.parent, 'parent'), 'read-only', '선생님은 휴지통 못 씀');
+});
+
+await test('임원이 올리기 · 자기보다 높은 등급은 못 올림 · 휴지통/되살리기', async () => {
+  const { id } = await DEV.o1.publish({ tier: 'teacher', data: { title: '달란트 표' } });
+  pub.talent = id;
+  assert(titles(await DEV.t1.list('teacher')).includes('달란트 표'), '선생님이 봄');
+  assert(!titles(await DEV.p1.listAll()).includes('달란트 표'), '학부모는 못 봄');
+  await rejects(() => DEV.o1.publish({ tier: 'admin', data: { title: 'x' } }), 'no-access', '임원이 관리자 등급');
+  await DEV.o1.unpublish(id, 'teacher');
+  assert(!titles(await DEV.t1.list('teacher')).includes('달란트 표'), '휴지통');
+  eq(titles(await DEV.t1.list('teacher', { deleted: true })), ['달란트 표'], '휴지통에 있음');
+  await DEV.o1.restore(id, 'teacher');
+  assert(titles(await DEV.t1.list('teacher')).includes('달란트 표'), '되살림');
+});
+
+// ---------- 7. 파일 ----------
+const rnd = n => { const u = new Uint8Array(n); for (let i = 0; i < n; i += 65536) crypto.getRandomValues(u.subarray(i, Math.min(n, i + 65536))); return u; };
+const blobBytes = async b => new Uint8Array(await b.arrayBuffer());
+const sameBytes = (a, b) => a.length === b.length && a.every((x, i) => x === b[i]);
+let f1; let f1bytes; let f1sha;
+await test('파일 왕복: 암호화해 공개 파일 저장소(-files-1)에, 다른 사람이 받아 풀기', async () => {
+  f1bytes = rnd(30000);
+  f1 = await DEV.o1.publishFile(new Blob([f1bytes], { type: 'application/octet-stream' }), { tier: 'parent', name: '수련회 사진.bin', data: { title: '수련회 사진' } });
+  eq(f1.repo, 'jayangchild-files-1', '첫 파일 저장소');
+  eq(gh.created, ['jayangchild-files-1'], '쓰기 토큰이 저장소를 만듦');
+  const stored = gh.repo(f1.repo).files.get(f1.path);
+  f1sha = stored.sha;
+  eq(stored.bytes.length, 30000 + 28, '암호문 크기 (iv + tag)');
+  assert(!sameBytes(stored.bytes.subarray(12, 76), f1bytes.subarray(0, 64)), '평문이 아님');
+  const got = await DEV.p1.file(f1.id, 'parent');
+  assert(sameBytes(await blobBytes(got), f1bytes), '학부모가 받은 내용이 같음');
+  const it = (await DEV.t1.list('parent')).find(x => x.id === f1.id);
+  eq([it.file.name, it.file.size, it.data.title], ['수련회 사진.bin', 30000, '수련회 사진'], '파일 정보는 암호화되어 있다가 풀림');
+  assert(!siteText('access/parent/index.json').includes('수련회'), '목록에 파일 이름 평문 없음');
+  // 공개 파일
+  const pf = await AX.publishFile(new Blob([C.utf8('공개 안내문')], { type: 'text/plain' }), { tier: 'public', name: '안내.txt' });
+  const anon = device('anon2');
+  eq(C.unutf8(await blobBytes(await anon.file(pf.id, 'public'))), '공개 안내문', '공개 파일은 로그인 없이');
+});
+
+await test('파일 저장소가 한도를 넘으면 -files-2 를 만들어 이어서 올림', async () => {
+  const b2 = rnd(30000);
+  const f2 = await DEV.o1.publishFile(new Blob([b2]), { tier: 'teacher', name: '두번째.bin' });
+  eq(f2.repo, 'jayangchild-files-2', '두 번째 저장소');
+  eq(gh.created, ['jayangchild-files-1', 'jayangchild-files-2'], '만든 저장소');
+  const man = siteJSON('access/files.json');
+  eq(man.repos.map(r => r.name), ['jayangchild-files-1', 'jayangchild-files-2'], '파일 저장소 목록');
+  assert(man.repos[0].bytes > 30000 && man.repos[1].bytes === 30028, `쓴 크기 ${JSON.stringify(man.repos)}`);
+  assert(sameBytes(await blobBytes(await DEV.t1.file(f2.id, 'teacher')), b2), '두 번째 저장소 파일도 받음');
+  assert(sameBytes(await blobBytes(await DEV.t1.file(f1.id, 'parent')), f1bytes), '첫 저장소 파일도 그대로');
+});
+
+// ---------- 8. 막기 ----------
+await test('막기: 커밋 하나 · 막힌 사람의 예전 꾸러미로 새 글을 못 풂 · 남은 사람은 그대로 로그인', async () => {
+  const p2 = device('p2');
+  await p2.login(P.p2.ident, P.p2.code);
+  const oldKey = p2.me().bundle.keys.parent;
+  eq(oldKey.kv, 1, '막기 전 열쇠 판 1');
+  const p2lid = p2.me().bundle.session.lid;
+  const before = site.commitLog.length;
+  const r = await admin.revoke(P.p2.id);
+  eq(site.commitLog.length, before + 1, '공개 저장소 커밋 하나');
+  const c = site.commitLog.at(-1);
+  assert(c.paths.includes('keyring.json') && c.paths.includes('access/parent/index.json'), `한 커밋에 keyring + 목록: ${c.paths}`);
+  eq([r.rotated, r.tokenExposed], [['parent'], false], '바뀐 등급');
+  assert(!siteJSON('keyring.json').slots[p2lid], '자리 지워짐');
+  eq((await admin.people()).find(p => p.id === P.p2.id).status, 'revoked', '명단에는 "막음"으로 남음');
+  // 새 글
+  const nid = (await AX.publish({ tier: 'parent', data: { title: '막은 뒤 새 소식' } })).id;
+  const idx = siteJSON('access/parent/index.json');
+  eq([idx.kv, idx.items[nid].kv, idx.items[pub.parent].kv], [2, 2, 2], '목록·새 글·예전 글 모두 새 열쇠(판 2)로');
+  const K = await C.importDEK(C.unb64(oldKey.k));
+  await rejects(() => C.decryptText(K, idx.items[nid].k, `item:parent:${nid}`), undefined, '예전 열쇠로 새 글의 항목 열쇠를 못 풂');
+  await rejects(() => p2.list('parent'), 'revoked', '막힌 사람 기기: 새 꾸러미를 못 받음');
+  eq(p2.me(), null, '막힌 기기는 로그아웃됨');
+  await rejects(() => device('p2b').login(P.p2.ident, P.p2.code), 'bad-login', '예전 코드로 로그인 안 됨');
+  // 남은 사람: 예전 코드로 새 기기에서 로그인 + 새 글 · 예전 파일
+  for (const k of ['p1', 't1', 'o1']) {
+    const d = device(`${k}-after`);
+    await d.login(P[k].ident, P[k].code);
+    eq(d.me().bundle.keys.parent.kv, 2, `${k} 새 열쇠`);
+    assert(titles(await d.list('parent')).includes('막은 뒤 새 소식'), `${k} 새 글 봄`);
+  }
+  // 이미 들어와 있던 기기(예전 꾸러미)는 저절로 새 꾸러미를 받음
+  assert(titles(await DEV.p1.list('parent')).includes('막은 뒤 새 소식'), '열려 있던 학부모 기기도 새 글 봄');
+  assert(sameBytes(await blobBytes(await DEV.p1.file(f1.id, 'parent')), f1bytes), '예전 파일도 열림');
+  eq(gh.repo(f1.repo).files.get(f1.path).sha, f1sha, '파일 암호문은 다시 올리지 않음 (항목 열쇠만 다시 감쌈)');
+  // 예전 꾸러미를 가진 임원 기기가 올려도 예전 열쇠로 감싸지 않음
+  const { id: oid } = await DEV.o1.publish({ tier: 'parent', data: { title: '임원이 올린 새 글' } });
+  eq(siteJSON('access/parent/index.json').items[oid].kv, 2, '임원 기기가 새 꾸러미를 받아 새 열쇠로 올림');
+});
+
+await test('쓰기 역할을 막으면 토큰이 노출됐다고 알림 → 토큰 바꾸기 → 남은 쓰기 역할은 새 토큰', async () => {
+  const r = await admin.revoke(P.o2.id);
+  eq([r.tokenExposed, r.rotated], [true, ['parent', 'teacher', 'officer']], '토큰 노출 · 바뀐 등급');
+  await admin.setToken('pub-tok-2');
+  gh.tokens.delete('pub-tok'); // 예전 토큰을 GitHub 에서 지움
+  await DEV.o1.refresh();
+  eq(DEV.o1.me().bundle.token, 'pub-tok-2', '임원 꾸러미에 새 토큰');
+  await DEV.o1.publish({ tier: 'officer', data: { title: '새 토큰으로 올림' } });
+  assert(titles(await AX.list('officer')).includes('새 토큰으로 올림'), '관리자도 새 토큰 (자기 꾸러미가 바뀜)');
+});
+
+await test('코드 새로 발급 · 역할 바꾸기 (낮추면 그 등급 열쇠도 바꿈)', async () => {
+  const before = site.commitLog.length;
+  const r = await admin.resetCode(P.p1.id);
+  eq(site.commitLog.length, before + 1, '커밋 하나');
+  await rejects(() => device('p1x').login(P.p1.ident, P.p1.code), 'bad-login', '예전 코드');
+  P.p1.code = r.code;
+  eq((await device('p1y').login(P.p1.ident, r.code)).role, 'parent', '새 코드');
+  await rejects(() => DEV.p1.refresh(), 'revoked', '예전 코드로 열린 기기는 새 코드로 다시 로그인해야 함');
+  const c = await admin.changeRole(P.t1.id, 'parent');
+  eq(c.rotated, ['teacher'], '선생님 열쇠 바뀜');
+  await rejects(() => DEV.t1.list('teacher'), 'no-access', '열려 있던 기기도 선생님 글 못 봄');
+  const d = device('t1-parent');
+  eq((await d.login(P.t1.ident, P.t1.code)).tiers, ['public', 'parent'], '같은 코드, 낮아진 등급');
+  await admin.changeRole(P.t1.id, 'teacher');
+  eq((await device('t1-back').login(P.t1.ident, P.t1.code)).tiers, ['public', 'parent', 'teacher'], '다시 올림');
+});
+
+// ---------- 9. 비밀문장 ----------
+await test('내 코드를 비밀문장으로: 약한 것 거부 · 쓰기 역할은 바로 · 읽기 역할은 관리자 요청 · 관리자 작업 뒤에도 유지', async () => {
+  await rejects(() => DEV.o1.changeSecret(P.o1.code, '20150304'), 'weak-passphrase', '생일');
+  await rejects(() => DEV.o1.changeSecret(P.o1.code, '1234'), 'weak-passphrase', 'PIN');
+  await rejects(() => DEV.o1.changeSecret('WRNG-CODE-XXXX', 'blue-river-sings-7'), 'bad-login', '지금 코드가 틀림');
+  eq(await DEV.o1.changeSecret(P.o1.code, 'blue-river-sings-7'), { done: true }, '임원은 바로');
+  await rejects(() => device('o1x').login(P.o1.ident, P.o1.code), 'bad-login', '예전 코드');
+  eq((await device('o1y').login(P.o1.ident, 'blue-river-sings-7')).role, 'officer', '비밀문장으로');
+  const p1 = device('p1-pass');
+  await p1.login(P.p1.ident, P.p1.code);
+  const { request } = await p1.changeSecret(P.p1.code, '우리 아이 웃음소리 2026');
+  assert(/^ACX1\./.test(request) && !request.includes('웃음'), '요청 글자에 비밀문장 없음');
+  const bad = request.slice(0, 40) + (request[40] === 'A' ? 'B' : 'A') + request.slice(41);
+  await rejects(() => admin.applySecretChange(bad), 'bad-request', '고친 요청');
+  await admin.applySecretChange(request);
+  eq((await device('p1-pass2').login(P.p1.ident, '우리 아이 웃음소리 2026')).role, 'parent', '학부모 비밀문장');
+  eq((await admin.people()).find(p => p.id === P.p1.id).secret, 'passphrase', '명단 표시');
+  await admin.addPerson({ name: '새선생님', identifier: 'new-teacher-03', role: 'teacher' }); // 관리자 작업 (keyring 다시 씀)
+  eq((await device('o1z').login(P.o1.ident, 'blue-river-sings-7')).role, 'officer', '관리자 작업 뒤에도 비밀문장 유지');
+});
+
+// ---------- 10. 관리자: 같은 로그인으로 데이터 저장소 열기 · 복구 ----------
+await test('관리자: 새 기기에서 아이디+코드 하나로 로그인 → 데이터 저장소(core)까지 열림', async () => {
+  await CA.sync();
+  const core2 = coreDevice('admin2');
+  const ax2 = device('admin2');
+  const r = await ax2.login('yunyeon-admin', adminCode);
+  eq([r.role, r.isAdmin], ['admin', true], '관리자');
+  await rejects(() => DEV.o1.openAdmin(core2), 'not-admin', '임원은 관리자 아님');
+  const a2 = await ax2.openAdmin(core2);
+  eq(core2.status().open, true, 'core 열림 (사이트 비밀번호 없이)');
+  assert((await a2.people()).some(p => p.name === '최총무님'), '명단 보임');
+});
+
+await test('관리자 코드를 잃었을 때: 명단 복구 코드 → 새 코드', async () => {
+  const ax3 = device('admin3');
+  await rejects(() => ax3.recoverAdmin(CA, 'AAAA-BBBB-CCCC-DDDD-EEEE-FFFF'), 'bad-code', '틀린 복구 코드');
+  const a3 = await ax3.recoverAdmin(CA, recoveryCode);
+  const me = (await a3.people()).find(p => p.role === 'admin');
+  const r = await a3.resetCode(me.id);
+  await rejects(() => device('admin4').login('yunyeon-admin', adminCode), 'bad-login', '예전 관리자 코드');
+  adminCode = r.code;
+  eq((await device('admin5').login('yunyeon-admin', r.code)).role, 'admin', '새 관리자 코드');
+});
+
+await test('끝까지 keyring·목록에 평문 없음', async () => {
+  const all = [...site.files.entries()].filter(([p]) => p !== 'access/public/index.json').map(([, f]) => C.unutf8(f.bytes)).join('\n');
+  for (const w of ['김학부모', '이학부모', '박선생님', '최총무님', '010-1111-2222', 'choi-officer-01', '학부모 사진첩', '임원회의', 'pub-tok', 'blue-river', '웃음소리']) assert(!all.includes(w), `공개 저장소에 "${w}"`);
+  for (const [name, r] of gh.repos) if (name.includes('-files-')) for (const [, f] of r.files) assert(!C.unutf8(f.bytes).includes('수련회'), '파일 저장소 평문 없음');
+});
+
+// ---------- 11. UI 키트 ----------
+await test('UI: 로그인 카드(아이디+코드, 역할 고르기 없음) · 안내문 · 막기 확인 글 · 사람 명단', async () => {
+  const ui = document.getElementById('ui');
+  const d = device('ui');
+  let got;
+  const done = new Promise(res => { got = res; });
+  const card = UI.loginCard({ access: d, onLogin: got });
+  ui.append(card);
+  assert(!card.querySelector('select') && card.querySelectorAll('input:not([type=checkbox])').length === 2, '입력은 아이디·코드 둘뿐');
+  card.querySelector('[name=identifier]').value = P.t1.ident;
+  card.querySelector('[name=code]').value = 'WRNG-WRNG-WRNG';
+  card.requestSubmit();
+  await new Promise(r => setTimeout(r, 1500));
+  assert(card.querySelector('.ax-err').textContent.includes('맞지 않아요'), '틀리면 한국어 안내');
+  card.querySelector('[name=code]').value = P.t1.code;
+  card.requestSubmit();
+  const res = await Promise.race([done, new Promise((_, rej) => setTimeout(() => rej(new Error('로그인 안 됨')), 10000))]);
+  eq([res.role, res.roleName], ['teacher', '선생님'], '로그인 결과 { role, labels, bundle }');
+  assert(Array.isArray(res.labels) && res.bundle, 'labels · bundle');
+  const msg = UI.revokeMessage({ name: '이학부모', canWrite: false });
+  assert(msg.includes('앞으로 올리는 새 내용은') && msg.includes('이미 내려받') && msg.includes('남아 있을 수 있어요') && msg.includes('남은 분들은'), '막기 글이 쉬운 말로');
+  assert(UI.revokeMessage({ name: '정서기님', canWrite: true }).includes('토큰'), '쓰기 역할은 토큰 안내');
+  const inv = UI.invitationCard({ title: '자양교회 유년부', siteUrl: CFG.siteUrl, name: '김학부모', identifier: '010-1111-2222', code: 'K7QX-M2PA-9TRD', roleLabel: '학부모' });
+  ui.append(inv);
+  assert(inv.querySelector('textarea').value.includes('K7QX-M2PA-9TRD') && [...inv.querySelectorAll('button')].map(b => b.textContent).join() === '안내문 복사,카드 인쇄', '안내문 · 복사 · 인쇄');
+  const p = UI.confirmRevoke({ name: '이학부모' });
+  const dlg = document.querySelector('dialog.ax-dialog');
+  assert(dlg?.open && dlg.textContent.includes('이미 내려받'), '막기 확인 창');
+  [...dlg.querySelectorAll('button')].find(b => b.textContent === '취소').click();
+  eq(await p, false, '취소');
+  const table = UI.peopleTable({ admin, access: AX });
+  ui.append(table);
+  await table.ready;
+  const rows = table.querySelectorAll('tbody tr');
+  eq(rows.length, (await admin.people()).length, '명단 줄 수');
+  assert(table.textContent.includes('임원') && table.textContent.includes('막음') && table.textContent.includes('마지막 접속'), '역할 · 막음 · 접속 기록 없음 안내');
+  assert([...table.querySelectorAll('option')].some(o => o.textContent === '임원 · 총무'), '직분 고르기');
+});
+
+// ---------- 12. 예전 core 시험 ----------
+await test('예전 core 시험(core-test.html) 모두 통과', async () => {
+  const fr = document.createElement('iframe');
+  fr.src = 'core-test.html';
+  document.body.append(fr);
+  const t0 = Date.now();
+  let s = '';
+  while (Date.now() - t0 < 180000) {
+    await new Promise(r => setTimeout(r, 300));
+    s = fr.contentDocument?.body?.dataset?.done || '';
+    if (s) break;
+  }
+  assert(/^PASS (\d+)\/\1$/.test(s), `core 시험: ${s || '시간 초과'}`);
+  report.core = s;
+  results.coreSummary = s;
+  document.getElementById('log').textContent += `core-test: ${s}\n`;
+});
+
+// ---------- 끝 ----------
+await AX.logout();
+for (const n of dbs) indexedDB.deleteDatabase(n);
+const fails = results.filter(r => !r.ok);
+const summary = `${fails.length ? 'FAIL' : 'PASS'} ${results.length - fails.length}/${results.length}`;
+document.getElementById('summary').textContent = summary;
+document.getElementById('summary').className = fails.length ? 'bad' : 'ok';
+document.title = `access 시험 ${summary}`;
+document.body.dataset.done = summary;
+document.getElementById('log').textContent += `공개 저장소 커밋 ${site.commitLog.length}개, 파일 ${site.files.size}개\n` + [...site.files.keys()].join('\n');
+if (new URLSearchParams(location.search).has('report')) {
+  fetch('/__report', { method: 'POST', body: JSON.stringify({ summary, results }) }).catch(() => {});
+}
+</script>
+</body>
+</html>

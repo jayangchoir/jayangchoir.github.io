@@ -1,11 +1,11 @@
 // 자양교회 어린이 합창단 — 관리자 데이터 암호화 저장·동기화 (core)
-// (자양교회 유년부 사이트 jayangchild-site 의 js/core 를 복사해 합창단용으로 고친 것. 바뀐 점은 README.md 맨 아래)
+// (jayangchild-site/js/core 를 복사해 이름·목록만 합창단용으로 바꾸고 backend() 하나를 더한 것. 바뀐 점은 README.md 맨 아래)
 //
 // 화면 코드는 이 파일(또는 index.js 의 core)만 부른다. 자세한 사용법: js/core/README.md
 //
 // ── 데이터 저장소(비공개 jayangchoir/jayangchoir-data) 구조 ──
 //   vault.json                 데이터 키(DEK)를 비밀번호·복구 코드로 감싼 값 + DEK로 암호화한 토큰. 그 밖에 비밀 정보 없음
-//   data/<목록>/<nn>.enc        기록 묶음(조각). 기록 id의 해시로 조각이 정해진다 (목록마다 16개, media·giftLog 는 64개)
+//   data/<목록>/<nn>.enc        기록 묶음(조각). 기록 id의 해시로 조각이 정해진다 (목록마다 16개, giftLog는 64개)
 //                              내용 = AES-GCM({ v, recs: [기록…] }), AAD = 경로
 //   files/<파일id>.bin          암호화한 사진·그림 ([iv 12바이트][암호문], AAD = 'file:<id>'). 한 번 올리면 바꾸지 않는다
 //
@@ -28,12 +28,12 @@
 
 import { KV } from './kv.js';
 import * as C from './crypto.js';
-import { GitHubBackend, GitHubAccount, isConflict } from './github.js';
+import { GitHubBackend, isConflict } from './github.js';
 import { mergeRecord, same, sameContent, META } from './merge.js';
 import { prepareImage } from './image.js';
 
 export const DEFAULT_REPO = { owner: 'jayangchoir', repo: 'jayangchoir-data', branch: 'main' };
-export const COLLECTIONS = ['notices', 'events', 'songs', 'videos', 'albums', 'members', 'people', 'media', 'settings', 'files']; // 사이트가 쓰는 목록 (다른 이름도 된다)
+export const COLLECTIONS = ['notices', 'events', 'songs', 'videos', 'albums', 'members', 'families', 'media', 'settings', 'files', 'accessSys', 'accessPeople']; // 사이트가 쓰는 목록 (다른 이름도 된다)
 const SHARD_COUNT = { media: 64, giftLog: 64 }; // 바꾸지 말 것 (바꾸면 기록이 다른 조각으로 간다)
 const DEFAULT_SHARDS = 16;
 export const MAX_FILE = 8e6; // 줄인 뒤 파일 하나 최대 8MB
@@ -79,7 +79,6 @@ async function pool(list, n, fn) {
 export function createCore(opts = {}) {
   const kv = new KV(opts.dbName || 'jayangchoir-core');
   const backendFor = opts.backend || ((token, dev) => new GitHubBackend({ token, ...dev }));
-  const accountFor = opts.account || (token => new GitHubAccount({ token, owner: DEFAULT_REPO.owner }));
   const autoSync = opts.autoSync !== false;
   const syncDelay = opts.syncDelay ?? 1500;
   const pollMs = opts.pollMs ?? 120000;
@@ -436,6 +435,45 @@ export function createCore(opts = {}) {
     st.device = { ...st.device, user: String(name || '').trim().slice(0, 40) };
     await kv.set('device', st.device);
     setState(st.state);
+  }
+
+  // ---------- 관리자 로그인으로 열기 (access.js) ----------
+  // 관리자의 접속 꾸러미(access.js bundle.vault)에는 이 데이터 키와 토큰이 들어 있다. 그래서 관리자는
+  // 사이트 로그인(아이디 + 코드) 한 번으로 이 저장소도 연다. 데이터 키는 비밀번호를 바꿔도 그대로다.
+
+  // 열려 있을 때만: 지금 데이터 키·토큰·저장소
+  function vaultKey() {
+    assertOpen();
+    const d = st.device;
+    return { dek: C.b64(st.dek.raw), token: st.token, owner: d.owner, repo: d.repo, branch: d.branch || 'main' };
+  }
+
+  // vaultKey() 로 받은 값으로 연다. 연결되지 않은 기기면 토큰으로 저장소의 vault.json 을 받아 연결한다
+  async function openWithKey({ dek, token, owner, repo, branch } = {}) {
+    await ready;
+    if (st.dek) return status();
+    if (!dek) throw new CoreError('bad-key', '데이터 열쇠가 없어요.');
+    const raw = C.unb64(dek);
+    const key = { raw, key: await C.importDEK(raw) };
+    const tokOf = async v => {
+      try { return await C.decryptText(key.key, v.tok, 'tok'); } catch { throw new CoreError('bad-key', '데이터 열쇠가 이 저장소와 맞지 않아요.'); }
+    };
+    const dev = { ...DEFAULT_REPO, ...(owner ? { owner } : {}), ...(repo ? { repo } : {}), ...(branch ? { branch } : {}) };
+    const here = st.device && st.vault?.tok && st.device.owner === dev.owner && st.device.repo === dev.repo;
+    if (here) {
+      await enter(key, await tokOf(st.vault));
+      return status();
+    }
+    const be = backendFor(token, dev);
+    dev.branch = (await be.check()).branch || dev.branch;
+    const got = await be.get(VAULT);
+    if (!got) throw new CoreError('not-setup', '아직 설정되지 않은 저장소예요.');
+    const vault = JSON.parse(C.unutf8(got.bytes));
+    const tok = await tokOf(vault);
+    await switchRepo(dev);
+    await saveDevice(dev, vault, got.sha);
+    await enter(key, tok);
+    return status();
   }
 
   // ---------- 비밀번호 / 복구 코드 / 토큰 ----------
@@ -932,21 +970,11 @@ export function createCore(opts = {}) {
     restore: id => collection('files').restore(id),
   };
 
-  // ---------- 다른 저장소 (합창단: 공개 사이트 저장소·사진 저장소) ----------
-  // 같은 토큰으로 다른 저장소를 읽고 쓴다. 토큰 자체는 화면 코드에 내보내지 않는다
+  // ---------- 다른 저장소 (합창단: 사진 저장소 choir-photos-N) ----------
+  // 같은 토큰으로 다른 저장소를 읽고 쓴다(사진·악보 올리기, 저장소 만들기). 토큰 자체는 화면 코드에 내보내지 않는다
   function backend(dev) {
     assertOpen();
     return backendFor(st.token, { branch: 'main', ...dev });
-  }
-  // 쓰기 역할(스탭)의 keyring 묶음에 넣을 토큰 (ACCESS-SPEC: write 역할의 묶음은 쓰기 토큰을 지닌다). 관리자 화면의 반영에서만 쓴다
-  function writeToken() {
-    assertOpen();
-    return st.token;
-  }
-  // 저장소 정보·만들기 (GitHubAccount 모양: repoInfo(name), createRepo(name, { description, private }))
-  function account() {
-    assertOpen();
-    return accountFor(st.token);
   }
 
   // ---------- 백업 ----------
@@ -997,6 +1025,8 @@ export function createCore(opts = {}) {
     newRecoveryCode,
     recover,
     rotateToken,
+    vaultKey,
+    openWithKey,
     // 데이터
     collection,
     files,
@@ -1004,8 +1034,6 @@ export function createCore(opts = {}) {
     exportBackup,
     hasUnsaved,
     backend,
-    account,
-    writeToken,
     // 시험용
     _st: st,
   };

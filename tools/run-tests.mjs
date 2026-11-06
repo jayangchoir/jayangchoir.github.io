@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const pages = process.argv.slice(2).length ? process.argv.slice(2) : ['core-test.html', 'tier-test.html'];
+const pages = process.argv.slice(2).length ? process.argv.slice(2) : ['core-test.html', 'access-test.html', 'tier-test.html'];
 const { server, port } = await serve(root);
 const { browser, close } = await launch();
 let bad = 0;

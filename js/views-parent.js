@@ -47,15 +47,14 @@ export function publicView(ctx, r) {
 
 // ---------- 로그인 (모든 역할이 한 곳에서) ----------
 export function loginView(ctx, prefill = '') {
-  const admin = ctx.core.status().connected;
   return `<div class="login">
     <img class="logo" src="assets/icon.svg" alt="">
     <h1>로그인</h1>
-    <p class="muted">초대 메시지에 있는 이름과 코드를 넣어 주세요.</p>
+    <p class="muted">안내문(초대 메시지)에 있는 이름과 접속 코드를 넣어 주세요. 학부모·스탭·관리자 모두 여기서 들어와요.</p>
     ${ctx.session.notice ? `<div class="warn" style="text-align:left">${esc(ctx.session.notice)}</div>` : ''}
     <form id="login-form" class="card" autocomplete="on">
       <label class="f"><span>이름</span><input id="lid" autocomplete="username" value="${esc(prefill)}" required placeholder="예: 아이 이름" enterkeyhint="next"></label>
-      <label class="f"><span>코드${admin ? ' (관리자는 관리자 비밀번호)' : ''}</span>
+      <label class="f"><span>접속 코드</span>
         <div class="pw-wrap"><input id="lpw" type="password" autocomplete="current-password" required enterkeyhint="go" placeholder="예: K7QX-M2PA-9TRD" autocapitalize="characters" spellcheck="false">
         <button type="button" class="icon-btn" data-act="toggle-pw" aria-label="코드 보기">${icon('eye')}</button></div></label>
       <label class="check"><input id="lrem" type="checkbox" checked> 이 휴대폰에서 계속 열어 두기</label>
@@ -63,7 +62,7 @@ export function loginView(ctx, prefill = '') {
       <div id="login-msg"></div>
       <p class="help" style="margin:14px 0 0">코드를 잃어버렸으면 총무님께 새 코드를 받으세요. 새 코드를 받으면 예전 코드는 못 써요.${ctx.session.offline ? '<br>지금은 인터넷이 없어서 마지막으로 받은 내용으로 열어요.' : ''}</p>
     </form>
-    <p class="tiny muted"><a href="#/">← 소개 페이지</a> · <a href="#/admin">관리자 기기 연결·처음 설정</a></p>
+    <p class="tiny muted"><a href="#/">← 소개 페이지</a> · <a href="#/admin">처음 설정·관리자 코드 분실</a></p>
   </div>`;
 }
 
@@ -169,7 +168,7 @@ function home(ctx) {
     ${s.youtube ? `<div class="card info-card"><h3>${icon('yt')} 유튜브 채널</h3><div class="txt small">공연·연습 영상을 모아 둔 곳이에요.</div><a class="btn small soft" style="margin-top:10px" href="${esc(s.youtube)}" target="_blank" rel="noopener noreferrer">${icon('ext')}채널 열기</a></div>` : ''}
   </div>
   ${(s.files || []).length ? `<div class="card"><h3>안내 자료</h3><div class="parts">${fileBtns(ctx, s.files)}</div></div>` : ''}
-  <p class="small muted" style="text-align:center;margin-top:24px">${esc(ctx.session.person?.name || '')} · <a href="#/">소개 페이지</a> · <a href="#/logout">로그아웃</a></p>`;
+  <p class="small muted" style="text-align:center;margin-top:24px">${esc(ctx.session.person?.name || '')} · <a href="#/">소개 페이지</a> · <button class="btn small ghost" data-chsecret>내 코드를 비밀문장으로</button> · <a href="#/logout">로그아웃</a></p>`;
 }
 
 // ---------- 공지 ----------
@@ -369,6 +368,7 @@ export async function bindParent(ctx, root, r) {
     else if (d.ytp) { const id = ytId(d.ytp); if (id) modal(`<div><div class="dlg-h"><h2>참고 영상</h2><button class="icon-btn" data-close aria-label="닫기">${icon('x')}</button></div><div class="yt"><iframe src="https://www.youtube-nocookie.com/embed/${id}?autoplay=1&rel=0&playsinline=1" allow="autoplay; encrypted-media; picture-in-picture; fullscreen" allowfullscreen title="영상"></iframe></div></div>`, { wide: true }); else window.open(d.ytp, '_blank', 'noopener'); }
     else if (d.open) openFile(ctx, d.open);
     else if (d.save) saveFile(ctx, d.save, t);
+    else if ('chsecret' in d) changeSecretDialog(ctx);
   };
   // 홈의 새 사진 · 앨범 사진
   const strip = root.querySelector('#home-strip, #album-grid');
@@ -473,4 +473,31 @@ export function lightbox(ctx, photos, start, title = '') {
   });
   show();
   return close;
+}
+
+// ---------- 내 코드를 내가 정한 비밀문장으로 (공유 모듈 access.changeSecret) ----------
+// 쓰기 역할(스탭)은 바로 바뀐다. 학부모는 올릴 수 없어서 "요청 글자"를 관리자에게 보내면 관리자가 적용한다(비밀문장은 들어 있지 않음).
+async function changeSecretDialog(ctx) {
+  await modal(`<form id="csf"><div class="dlg-h"><h2>비밀문장으로 바꾸기</h2><button type="button" class="icon-btn" data-close aria-label="닫기">${icon('x')}</button></div>
+    <p class="small">받은 접속 코드 대신 나만 아는 문장(10자 이상)으로 들어올 수 있어요. 생일·전화번호·숫자만은 안 돼요.</p>
+    <label class="f"><span>지금 쓰는 코드</span><input id="cs-old" type="password" autocomplete="current-password" required></label>
+    <label class="f"><span>새 비밀문장</span><input id="cs-new" type="password" autocomplete="new-password" required minlength="10" placeholder="예: 우리 아이 웃음소리 2026"></label>
+    <div id="cs-out"></div>
+    <div class="row end"><button type="button" class="btn ghost" data-close>닫기</button><button class="btn primary" id="cs-ok">바꾸기</button></div></form>`, {
+    onOpen: b => {
+      b.querySelector('#csf').onsubmit = async e => {
+        e.preventDefault();
+        const out = b.querySelector('#cs-out');
+        await busy(b.querySelector('#cs-ok'), '바꾸는 중…', async () => {
+          try {
+            const r = await ctx.session.access.changeSecret(b.querySelector('#cs-old').value, b.querySelector('#cs-new').value);
+            if (r.done) out.innerHTML = '<div class="ok-box">바꿨어요. 다음부터 새 비밀문장으로 들어오세요.</div>';
+            else out.innerHTML = `<div class="warn">학부모 화면은 직접 올릴 수 없어서, 아래 글자를 총무님(관리자)께 보내 주세요. 관리자가 적용하면 새 비밀문장으로 들어올 수 있어요. (이 글자에는 비밀문장이 들어 있지 않아요)</div>
+              <textarea readonly rows="4" id="cs-req">${esc(r.request)}</textarea><button type="button" class="btn small soft" id="cs-copy" style="margin-top:6px">${icon('copy')} 복사</button>`;
+            b.querySelector('#cs-copy')?.addEventListener('click', () => copyText(r.request));
+          } catch (err) { out.innerHTML = `<div class="err">${esc(err.message)}</div>`; }
+        });
+      };
+    },
+  });
 }
