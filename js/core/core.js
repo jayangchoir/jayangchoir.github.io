@@ -33,7 +33,7 @@ import { mergeRecord, same, sameContent, META } from './merge.js';
 import { prepareImage } from './image.js';
 
 export const DEFAULT_REPO = { owner: 'jayangchoir', repo: 'jayangchoir-data', branch: 'main' };
-export const COLLECTIONS = ['notices', 'events', 'songs', 'videos', 'albums', 'members', 'media', 'settings', 'files']; // 사이트가 쓰는 목록 (다른 이름도 된다)
+export const COLLECTIONS = ['notices', 'events', 'songs', 'videos', 'albums', 'members', 'people', 'media', 'settings', 'files']; // 사이트가 쓰는 목록 (다른 이름도 된다)
 const SHARD_COUNT = { media: 64, giftLog: 64 }; // 바꾸지 말 것 (바꾸면 기록이 다른 조각으로 간다)
 const DEFAULT_SHARDS = 16;
 export const MAX_FILE = 8e6; // 줄인 뒤 파일 하나 최대 8MB
@@ -938,6 +938,11 @@ export function createCore(opts = {}) {
     assertOpen();
     return backendFor(st.token, { branch: 'main', ...dev });
   }
+  // 쓰기 역할(스탭)의 keyring 묶음에 넣을 토큰 (ACCESS-SPEC: write 역할의 묶음은 쓰기 토큰을 지닌다). 관리자 화면의 반영에서만 쓴다
+  function writeToken() {
+    assertOpen();
+    return st.token;
+  }
   // 저장소 정보·만들기 (GitHubAccount 모양: repoInfo(name), createRepo(name, { description, private }))
   function account() {
     assertOpen();
@@ -1000,6 +1005,7 @@ export function createCore(opts = {}) {
     hasUnsaved,
     backend,
     account,
+    writeToken,
     // 시험용
     _st: st,
   };

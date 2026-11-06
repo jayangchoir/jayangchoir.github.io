@@ -111,3 +111,15 @@ export function assertNoContacts(objs, data) {
     throw e;
   }
 }
+
+// ---------- 공개 단계 (누구나 보는 홍보 페이지, 평문) ----------
+// settings/public 의 칸 + "공개 페이지에 보이기"를 켠 영상만. 명단·일정·사진·연락처는 넣지 않는다.
+export const PUBLIC_FIELDS = ['title', 'tagline', 'intro', 'activity', 'join', 'contactNote', 'youtube'];
+export function buildPublic(data) {
+  const p = (data.settings || []).find(s => s.id === 'public') || {};
+  return {
+    v: 1,
+    ...pick(p, PUBLIC_FIELDS),
+    videos: (data.videos || []).filter(v => v.public && !v.deletedAt).sort(byDate).map(v => ({ date: v.date || '', title: String(v.title || ''), urls: (v.urls || []).map(String) })),
+  };
+}

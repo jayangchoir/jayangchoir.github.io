@@ -122,5 +122,7 @@ core.files.softDelete(id) / restore(id) / list()
 - `core.account()` — 저장소 정보 보기·만들기 (`GitHubAccount`: `repoInfo`, `createRepo`). 사진 저장소 choir-photos-N 을 자동으로 만들 때.
 - `GitHubBackend.commitFiles(files, message)` — 여러 파일을 커밋 하나로 (학부모용 내용이 반쯤 바뀐 채로 보이지 않게).
 - `fake-backend.js` 에 `FakeGitHub` (저장소 여러 개 + `raw()` 공개 읽기 흉내) 와 `commitFiles`.
-- `scrypt.js` — 학부모 단계 키 만들기 (RFC 7914, 시험 값 확인).
-- 사진·PDF 는 core 의 `files`(비공개 저장소) 대신 `js/media.js` 가 공개 사진 저장소에 파일마다 다른 키로 암호화해 둔다. 키는 `media` 기록(관리자)과 학부모용 묶음(학부모 비밀번호)에만 있다.
+- `access.js` — ACCESS-SPEC.md(jayangchild-site/js/core) 를 따른 역할·코드·keyring·authProvider. 공유 모듈이 오면 교체.
+- `core.writeToken()` — 스탭(쓰기 역할) keyring 묶음에 넣을 토큰.
+- `people` 목록 (가족·스탭).
+- 사진·PDF 는 core 의 `files`(비공개 저장소) 대신 `js/media.js` 가 공개 사진 저장소에 파일마다 다른 키로 암호화해 둔다. 키는 `media` 기록(관리자)과 학부모용 묶음(학부모 열쇠)에만 있다.

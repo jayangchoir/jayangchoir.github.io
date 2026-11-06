@@ -1,5 +1,5 @@
 // 학부모 화면 — 홈 · 일정 · 연주곡 · 영상 · 사진 · 명단 · 공지
-// 내용은 모두 학부모 비밀번호로 푼 묶음(parent.bundle)에서 온다. 연락처는 묶음에 없다.
+// 공개 페이지는 평문(p/public.json), 학부모 화면은 학부모 열쇠로 푼 묶음(session.bundle)에서 온다. 연락처는 묶음에 없다.
 import { esc, textHtml, icon, dateKo, dateDot, dDay, parseYmd, ymd, download, toast, toastErr, modal, closeModal, copyText, busy, inlinePdfOk, isIOS, size } from './ui.js';
 import { ytId } from './plan.js';
 import { eventIcs } from './ics.js';
@@ -22,28 +22,48 @@ export function seenAt() {
 const markSeen = () => { try { localStorage.setItem(SEEN, new Date().toISOString()); } catch {} };
 export const newNotices = b => { const s = seenAt(); return (b?.notices || []).filter(n => n.at && n.at > s); };
 
-// ---------- 들어가기 ----------
-export function loginView(ctx, state) {
-  if (state === 'none') {
-    return `<div class="login"><img class="logo" src="assets/icon.svg" alt=""><h1>자양교회 어린이 합창단</h1>
-      <p class="muted">학부모 화면을 준비하고 있어요. 조금 뒤에 다시 와 주세요.</p>
-      <p class="tiny muted" style="margin-top:40px"><a href="#/admin">관리자</a></p></div>`;
+// ---------- 공개 페이지 (누구나) ----------
+const DEFAULT_PUB = { title: '자양교회 어린이 합창단', tagline: '함께 노래하는 어린이 합창단', intro: '', activity: '', join: '' };
+export function publicView(ctx, r) {
+  const p = { ...DEFAULT_PUB, ...(ctx.session.pub || {}) };
+  const logged = ctx.session.role !== 'public';
+  const loginBtn = logged ? `<a class="btn primary" href="#/home">${icon('home')} 내 화면으로</a>` : `<a class="btn primary" href="#/login">${icon('lock')} 로그인</a>`;
+  if (r[0] === 'join') {
+    return `<a class="btn small ghost" href="#/">${icon('left')} 소개</a>
+      <h1 style="margin-top:8px">입단 안내</h1>
+      <div class="card"><div class="txt">${textHtml(p.join || '입단 안내를 준비하고 있어요.')}</div></div>
+      ${p.contactNote ? `<div class="card info-card"><h3>${icon('phone')} 문의</h3><div class="txt">${textHtml(p.contactNote)}</div></div>` : ''}
+      <div class="row">${loginBtn}</div>`;
   }
+  return `<section class="hero pub-hero">${NOTE_SVG}<h1>${esc(p.title)}</h1><p>${esc(p.tagline || '')}</p>
+      <div class="row" style="margin-top:16px">${logged ? `<a class="btn" href="#/home">${icon('home')} 내 화면으로</a>` : `<a class="btn" href="#/login">${icon('lock')} 로그인</a>`}<a class="btn ghost-light" href="#/join">입단 안내</a></div></section>
+    ${ctx.session.notice ? `<div class="warn">${esc(ctx.session.notice)}</div>` : ''}
+    ${p.intro ? `<div class="card"><h2>소개</h2><div class="txt">${textHtml(p.intro)}</div></div>` : ''}
+    ${p.activity ? `<div class="card info-card"><h3>${icon('music')} 이렇게 활동해요</h3><div class="txt">${textHtml(p.activity)}</div></div>` : ''}
+    ${(p.videos || []).length ? `<div class="sec-title"><h2>공연 영상</h2></div>${p.videos.map(v => `<div class="card vid-card home-vid"><span class="small muted">${esc(dateDot(v.date))}</span><h3>${esc(v.title)}</h3><div class="yt-grid">${v.urls.map(u => ytBox(u, v.title)).join('')}</div></div>`).join('')}` : ''}
+    ${p.youtube ? `<a class="btn soft block" href="${esc(p.youtube)}" target="_blank" rel="noopener noreferrer">${icon('yt')} 유튜브 채널</a>` : ''}
+    <p class="small muted" style="text-align:center;margin-top:24px">일정·연주곡·악보·사진은 합창단 가족만 볼 수 있어요. 초대 메시지의 이름과 코드로 로그인해 주세요.</p>`;
+}
+
+// ---------- 로그인 (모든 역할이 한 곳에서) ----------
+export function loginView(ctx, prefill = '') {
+  const admin = ctx.core.status().connected;
   return `<div class="login">
     <img class="logo" src="assets/icon.svg" alt="">
-    <h1>자양교회 어린이 합창단</h1>
-    <p class="muted">학부모 비밀번호를 넣어 주세요.</p>
+    <h1>로그인</h1>
+    <p class="muted">초대 메시지에 있는 이름과 코드를 넣어 주세요.</p>
+    ${ctx.session.notice ? `<div class="warn" style="text-align:left">${esc(ctx.session.notice)}</div>` : ''}
     <form id="login-form" class="card" autocomplete="on">
-      <input type="text" name="username" value="학부모" autocomplete="username" hidden>
-      <label class="f"><span>학부모 비밀번호</span>
-        <div class="pw-wrap"><input id="ppw" type="password" autocomplete="current-password" required enterkeyhint="go">
-        <button type="button" class="icon-btn" data-act="toggle-pw" aria-label="비밀번호 보기">${icon('eye')}</button></div></label>
-      <label class="check"><input id="premember" type="checkbox" checked> 이 휴대폰에서 계속 열어 두기</label>
+      <label class="f"><span>이름</span><input id="lid" autocomplete="username" value="${esc(prefill)}" required placeholder="예: 아이 이름" enterkeyhint="next"></label>
+      <label class="f"><span>코드${admin ? ' (관리자는 관리자 비밀번호)' : ''}</span>
+        <div class="pw-wrap"><input id="lpw" type="password" autocomplete="current-password" required enterkeyhint="go" placeholder="예: K7QX-M2PA-9TRD" autocapitalize="characters" spellcheck="false">
+        <button type="button" class="icon-btn" data-act="toggle-pw" aria-label="코드 보기">${icon('eye')}</button></div></label>
+      <label class="check"><input id="lrem" type="checkbox" checked> 이 휴대폰에서 계속 열어 두기</label>
       <button class="btn primary block" id="login-btn">들어가기</button>
       <div id="login-msg"></div>
-      <p class="help" style="margin:14px 0 0">비밀번호는 합창단 단체방 공지나 총무님께 받을 수 있어요.${ctx.parent.offline ? '<br>지금은 인터넷이 없어서 마지막으로 받은 내용으로 열어요.' : ''}</p>
+      <p class="help" style="margin:14px 0 0">코드를 잃어버렸으면 총무님께 새 코드를 받으세요. 새 코드를 받으면 예전 코드는 못 써요.${ctx.session.offline ? '<br>지금은 인터넷이 없어서 마지막으로 받은 내용으로 열어요.' : ''}</p>
     </form>
-    <p class="tiny muted"><a href="#/admin">관리자</a></p>
+    <p class="tiny muted"><a href="#/">← 소개 페이지</a> · <a href="#/admin">관리자 기기 연결·처음 설정</a></p>
   </div>`;
 }
 
@@ -56,17 +76,17 @@ export function bindLogin(ctx) {
     msg.innerHTML = '';
     await busy(document.getElementById('login-btn'), '여는 중…', async () => {
       try {
-        await ctx.parent.login(document.getElementById('ppw').value, { remember: document.getElementById('premember').checked });
-        ctx.parentState = 'open';
-        ctx.render();
+        const role = await ctx.session.login(document.getElementById('lid').value, document.getElementById('lpw').value, { remember: document.getElementById('lrem').checked });
+        if (role === 'admin') ctx.uploads.resume();
+        ctx.go(role === 'admin' ? '#/admin' : '#/home');
       } catch (err) {
-        msg.innerHTML = `<div class="err">${esc(err.code === 'bad-password' ? '비밀번호가 맞지 않아요. 다시 확인해 주세요.' : err.message)}</div>`;
-        document.getElementById('ppw').select();
+        msg.innerHTML = `<div class="err">${esc(err.message)}</div>`;
+        document.getElementById('lpw').select();
       }
     });
   });
-  f.querySelector('[data-act=toggle-pw]').onclick = () => { const i = document.getElementById('ppw'); i.type = i.type === 'password' ? 'text' : 'password'; };
-  setTimeout(() => document.getElementById('ppw')?.focus(), 50);
+  f.querySelector('[data-act=toggle-pw]').onclick = () => { const i = document.getElementById('lpw'); i.type = i.type === 'password' ? 'text' : 'password'; };
+  setTimeout(() => { const lid = document.getElementById('lid'); if (lid) (lid.value ? document.getElementById('lpw') : lid).focus(); }, 50);
 }
 
 // ---------- 공통 조각 ----------
@@ -85,7 +105,7 @@ function nextCard(e, label) {
 }
 
 const fileBtns = (ctx, ids) => (ids || []).map(id => {
-  const f = ctx.parent.bundle.files[id];
+  const f = ctx.session.bundle.files[id];
   if (!f) return '';
   const pdf = /pdf/.test(f.t || '') || /\.pdf$/i.test(f.n || '');
   return `<div class="part"><span>${icon(pdf ? 'pdf' : 'photo')}</span><span class="lbl">${esc(f.n)}<small>${pdf ? 'PDF' : '파일'} · ${size(f.s)}</small></span>
@@ -100,7 +120,8 @@ function ytBox(url, title = '') {
 
 // ---------- 홈 ----------
 function home(ctx) {
-  const b = ctx.parent.bundle;
+  const b = ctx.session.bundle;
+  if (!b) return `<h1>안녕하세요</h1><div class="card empty">학부모 화면이 아직 반영되지 않았어요.${ctx.session.role === 'admin' ? ' 관리자 화면의 대시보드에서 "학부모 화면에 반영"을 눌러 주세요.' : ' 조금 뒤에 다시 와 주세요.'}</div>`;
   const s = b.site || {};
   const t = today();
   const upcoming = b.events.filter(e => (e.end || e.date) >= t);
@@ -147,12 +168,13 @@ function home(ctx) {
     ${s.contactNote ? `<div class="card info-card"><h3>${icon('phone')} 문의</h3><div class="txt">${textHtml(s.contactNote)}</div></div>` : ''}
     ${s.youtube ? `<div class="card info-card"><h3>${icon('yt')} 유튜브 채널</h3><div class="txt small">공연·연습 영상을 모아 둔 곳이에요.</div><a class="btn small soft" style="margin-top:10px" href="${esc(s.youtube)}" target="_blank" rel="noopener noreferrer">${icon('ext')}채널 열기</a></div>` : ''}
   </div>
-  ${(s.files || []).length ? `<div class="card"><h3>안내 자료</h3><div class="parts">${fileBtns(ctx, s.files)}</div></div>` : ''}`;
+  ${(s.files || []).length ? `<div class="card"><h3>안내 자료</h3><div class="parts">${fileBtns(ctx, s.files)}</div></div>` : ''}
+  <p class="small muted" style="text-align:center;margin-top:24px">${esc(ctx.session.person?.name || '')} · <a href="#/">소개 페이지</a> · <a href="#/logout">로그아웃</a></p>`;
 }
 
 // ---------- 공지 ----------
 function notices(ctx, openId) {
-  const b = ctx.parent.bundle;
+  const b = ctx.session.bundle;
   const news = new Set(newNotices(b).map(n => n.id));
   setTimeout(markSeen, 1500);
   if (!b.notices.length) return '<h1>공지</h1><div class="card empty">아직 공지가 없어요.</div>';
@@ -184,7 +206,7 @@ function byMonth(list, past) {
 }
 
 function schedule(ctx) {
-  const b = ctx.parent.bundle;
+  const b = ctx.session.bundle;
   const t = today();
   const mode = ctx.ui.schedMode || 'list';
   const up = b.events.filter(e => (e.end || e.date) >= t);
@@ -241,7 +263,7 @@ function calendar(ctx, events) {
 
 // ---------- 연주곡 ----------
 function songs(ctx) {
-  const b = ctx.parent.bundle;
+  const b = ctx.session.bundle;
   if (!b.songs.length) return '<h1>연주곡</h1><div class="card empty">아직 연주곡이 없어요.</div>';
   const groups = [];
   for (const s of b.songs) {
@@ -266,7 +288,7 @@ function songs(ctx) {
 
 // ---------- 영상 ----------
 function videos(ctx) {
-  const b = ctx.parent.bundle;
+  const b = ctx.session.bundle;
   const kind = ctx.ui.vidKind || 'perf';
   const list = b.videos.filter(v => v.kind === kind).sort((a, c) => String(c.date).localeCompare(String(a.date)));
   return `<div class="row between" style="margin-bottom:12px"><h1 style="margin:0">영상</h1>
@@ -279,7 +301,7 @@ function videos(ctx) {
 
 // ---------- 사진 ----------
 function albums(ctx) {
-  const b = ctx.parent.bundle;
+  const b = ctx.session.bundle;
   if (!b.albums.length) return '<h1>사진</h1><div class="card empty">아직 사진이 없어요.</div>';
   return `<h1>사진</h1><div class="albums">${b.albums.map(a => `<a class="album" href="#/photos/${esc(a.id)}">
     <span class="ph">${a.cover ? `<img data-fid="${esc(a.cover)}" alt="">` : ''}</span>
@@ -287,7 +309,7 @@ function albums(ctx) {
 }
 
 function album(ctx, id) {
-  const a = ctx.parent.bundle.albums.find(x => x.id === id);
+  const a = ctx.session.bundle.albums.find(x => x.id === id);
   if (!a) return '<div class="card empty">앨범을 찾지 못했어요.</div>';
   return `<a class="btn small ghost" href="#/photos">${icon('left')} 사진첩</a>
     <h1 style="margin-top:8px">${esc(a.title)}</h1><p class="muted small">${esc(dateKo(a.date, { year: true }))} · ${a.count}장 · 사진을 누르면 크게 보여요.</p>
@@ -297,7 +319,7 @@ function album(ctx, id) {
 
 // ---------- 명단 ----------
 function roster(ctx) {
-  const b = ctx.parent.bundle;
+  const b = ctx.session.bundle;
   const groups = [];
   for (const m of b.roster) {
     let g = groups.find(x => x.grade === m.grade);
@@ -317,19 +339,19 @@ function roster(ctx) {
 // ---------- 그리기 + 손잡이 ----------
 export function parentView(ctx, r) {
   switch (r[0] || '') {
-    case '': return home(ctx);
+    case 'home': return home(ctx);
     case 'notices': return notices(ctx, r[1]);
     case 'schedule': return schedule(ctx);
     case 'songs': return songs(ctx);
     case 'videos': return videos(ctx);
     case 'photos': return r[1] ? album(ctx, r[1]) : albums(ctx);
     case 'roster': return roster(ctx);
-    default: return '<div class="card empty">없는 화면이에요. <a href="#/">홈으로</a></div>';
+    default: return '<div class="card empty">없는 화면이에요. <a href="#/home">홈으로</a></div>';
   }
 }
 
 export async function bindParent(ctx, root, r) {
-  const b = ctx.parent.bundle;
+  const b = ctx.session.bundle || { files: {}, events: [], albums: [], notices: [] };
   for (const [id, e] of Object.entries(b.files || {})) ctx.reg(id, e);
   root.querySelector('[data-scroll]') && document.getElementById(root.querySelector('[data-scroll]').dataset.scroll)?.scrollIntoView({ block: 'start' });
   root.onclick = async ev => {
@@ -353,7 +375,7 @@ export async function bindParent(ctx, root, r) {
   if (strip) {
     const meta = b.albums.find(a => a.id === strip.dataset.album);
     try {
-      const list = await ctx.parent.album(meta);
+      const list = await ctx.session.album(meta);
       const photos = strip.id === 'home-strip' ? list.photos.slice(-6).reverse() : list.photos;
       for (const p of list.photos) ctx.reg(p.id, p);
       strip.innerHTML = photos.map((p, i) => `<button class="ph" data-lb="${i}" aria-label="사진 ${i + 1}"><img data-fid="${esc(p.id)}" alt=""></button>`).join('');
@@ -373,12 +395,12 @@ function playYt(btn, id) {
 // ---------- PDF·파일 열기 ----------
 // 데스크톱: 페이지 안 보기(iframe). 휴대폰(iOS·안드로이드): 새 탭 링크 + 내려받기 (blob PDF 를 페이지 안에서 못 보여 주는 브라우저가 많다)
 async function openFile(ctx, id) {
-  const e = ctx.parent.bundle.files[id];
+  const e = ctx.session.bundle.files[id];
   const pdf = /pdf/.test(e.t || '') || /\.pdf$/i.test(e.n);
   modal(`<div><div class="dlg-h"><h2 style="font-size:18px">${esc(e.n)}</h2><button class="icon-btn" data-close aria-label="닫기">${icon('x')}</button></div>
     <div id="pdf-body"><p class="muted"><span class="spin"></span> 여는 중… <span id="pdf-pct"></span></p></div></div>`, { wide: true });
   try {
-    const blob = await ctx.parent.file(id, e, x => { const p = document.getElementById('pdf-pct'); if (p) p.textContent = `${Math.round(x * 100)}%`; });
+    const blob = await ctx.session.file(id, e, x => { const p = document.getElementById('pdf-pct'); if (p) p.textContent = `${Math.round(x * 100)}%`; });
     const typed = new Blob([blob], { type: pdf ? 'application/pdf' : e.t || 'application/octet-stream' });
     const url = URL.createObjectURL(typed);
     ctx.blobUrls.push(url);
@@ -398,9 +420,9 @@ async function openFile(ctx, id) {
 }
 
 async function saveFile(ctx, id, btn) {
-  const e = ctx.parent.bundle.files[id];
+  const e = ctx.session.bundle.files[id];
   await busy(btn, '', async () => {
-    try { download(await ctx.parent.file(id, e), e.n); } catch (err) { toastErr(err); }
+    try { download(await ctx.session.file(id, e), e.n); } catch (err) { toastErr(err); }
   });
 }
 

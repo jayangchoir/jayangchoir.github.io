@@ -1,15 +1,21 @@
-// 화면 틀 — 주소(#/…)에 따라 학부모 화면·관리자 화면을 그린다. main.js(실제)와 tools/demo.js(가짜 GitHub)가 start() 를 부른다.
+// 화면 틀 — 주소(#/…)에 따라 그린다. main.js(실제)와 tools/demo.js(가짜 GitHub)가 start() 를 부른다.
+//   #/ · #/join          공개 (누구나, 첫 화면)            #/login[/이름]   로그인 (모든 역할 한 곳)
+//   #/home · #/schedule · #/songs · #/videos · #/photos[/id] · #/roster · #/notices   학부모 이상
+//   #/staff[/meetings|snacks]   스탭 이상                   #/admin[/…]       관리자 (연결·처음 설정 포함)
+//   #/logout
 import { $, esc, icon, toast, toastErr, initModal, size } from './ui.js';
 import { createMedia, readThumb, readEntry } from './media.js';
 import { createPublisher } from './publish.js';
 import { createUploads } from './uploads.js';
 import { createGoogleAuth, createOriginals, photosBackend, driveBackend, SCOPES } from './google.js';
-import { loginView, bindLogin, parentView, bindParent, newNotices } from './views-parent.js';
+import { loginView, bindLogin, parentView, bindParent, newNotices, publicView } from './views-parent.js';
 import { adminView } from './views-admin.js';
+import { staffView } from './views-staff.js';
 
-const PARENT_NAV = [['', '홈', 'home'], ['schedule', '일정', 'cal'], ['songs', '연주곡', 'music'], ['videos', '영상', 'video'], ['photos', '사진', 'photo'], ['roster', '명단', 'people']];
+const PARENT_NAV = [['home', '홈', 'home'], ['schedule', '일정', 'cal'], ['songs', '연주곡', 'music'], ['videos', '영상', 'video'], ['photos', '사진', 'photo'], ['roster', '명단', 'people']];
+const PARENT_ROUTES = new Set(['home', 'schedule', 'songs', 'videos', 'photos', 'roster', 'notices']);
 
-export async function start({ core, parent, read, limit, demo = false, uploadsDb }) {
+export async function start({ core, session, read, limit, demo = false, uploadsDb, staffBackend }) {
   initModal();
   const settings = () => core.collection('settings');
   const gcfg = () => (core.status().open ? settings().get('google') || {} : {});
@@ -23,10 +29,9 @@ export async function start({ core, parent, read, limit, demo = false, uploadsDb
     setAlbumId: async (k, v) => { const g = gcfg(); await settings().put({ ...g, id: 'google', albums: { ...(g.albums || {}), [k]: v } }); },
   });
   const ctx = {
-    core, parent, media, read, demo, gAuth, originals,
+    core, session, parent: session, media, read, demo, gAuth, originals, staffBackend,
     pub: createPublisher({ core }),
     uploads: null,
-    parentState: 'locked',
     ui: {},
     blobUrls: [],
     render: () => render(),
@@ -71,7 +76,7 @@ export async function start({ core, parent, read, limit, demo = false, uploadsDb
     history.replaceState(null, '', `${location.pathname}#/admin`);
   }
   if (core.status().connected) { try { await core.resume(); } catch (e) { console.warn(e); } }
-  try { ctx.parentState = await parent.load(); } catch (e) { console.warn(e); ctx.parentState = 'none'; }
+  try { await session.load(); } catch (e) { console.warn(e); }
   if (core.status().open) ctx.uploads.kick();
 
   core.onStatus(() => paintTop(ctx));
@@ -90,61 +95,90 @@ export async function start({ core, parent, read, limit, demo = false, uploadsDb
     const r = route();
     const view = $('#view');
     for (const u of ctx.blobUrls.splice(0)) URL.revokeObjectURL(u);
-    const isAdmin = r[0] === 'admin';
+    // 관리자가 잠겼으면(다른 기기에서 비밀번호가 바뀌는 등) 역할도 맞춘다
+    if (session.role === 'admin' && !core.status().open) { await session.load(); }
+    if (r[0] === 'logout') {
+      await gAuth.revoke();
+      ctx.uploads.stop();
+      await session.logout();
+      await session.load().catch(() => {}); // 공개 페이지 다시 받기
+      toast('로그아웃했어요. 이 휴대폰에 기억한 코드도 지웠어요.');
+      location.hash = '#/';
+      return;
+    }
     paintNav(ctx, r);
     paintTop(ctx);
     renderUploads(ctx, ctx.uploads.snapshot());
-    if (isAdmin) {
+    document.title = '자양교회 어린이 합창단';
+    if (r[0] === 'admin') {
+      // 관리자 기기가 연결되어 있는데 잠겨 있으면 → 하나뿐인 로그인 화면으로
+      if (core.status().connected && !core.status().open) { location.hash = '#/login'; return; }
+      if (core.status().open && session.role !== 'admin') await session.refreshAdmin();
       try { await adminView(ctx, view, r.slice(1)); } catch (e) { console.error(e); view.innerHTML = `<div class="err">${esc(e.message)}</div>`; }
       return;
     }
-    if (ctx.parentState !== 'open') {
-      view.innerHTML = loginView(ctx, ctx.parentState);
+    if (!r[0] || r[0] === 'join') { view.innerHTML = publicView(ctx, r); await bindParent(ctx, view, r, { publicOnly: true }); return; }
+    if (r[0] === 'login') {
+      if (session.role !== 'public' && !r[1]) { location.hash = '#/home'; return; }
+      view.innerHTML = loginView(ctx, r[1] || '');
       bindLogin(ctx);
       return;
     }
-    view.innerHTML = parentView(ctx, r);
+    if (r[0] === 'staff') {
+      if (!session.has('staff')) { location.hash = '#/login'; return; }
+      document.title = '스탭 · 자양교회 어린이 합창단';
+      await staffView(ctx, view, r.slice(1));
+      return;
+    }
+    if (!PARENT_ROUTES.has(r[0])) { view.innerHTML = '<div class="card empty">없는 화면이에요. <a href="#/">첫 화면으로</a></div>'; return; }
+    if (!session.has('parent')) { location.hash = '#/login'; return; }
+    view.innerHTML = parentView(ctx, session.bundle ? r : ['home']);
     document.title = `${({ schedule: '일정', songs: '연주곡', videos: '영상', photos: '사진', roster: '명단', notices: '공지' })[r[0]] || '홈'} · 자양교회 어린이 합창단`;
-    await bindParent(ctx, view, r);
+    if (session.bundle) await bindParent(ctx, view, r);
   }
-  ctx.logoutParent = async () => { await parent.logout(); ctx.parentState = 'locked'; render(); };
   render();
   return ctx;
 }
 
 function paintNav(ctx, r) {
-  const admin = r[0] === 'admin';
-  const open = ctx.parentState === 'open';
+  const s = ctx.session;
   const nav = $('#nav');
   const tab = $('#tabbar');
-  if (admin) {
-    nav.innerHTML = `<a href="#/">${icon('home')} 학부모 화면</a>`;
+  const cur = r[0] || '';
+  const logged = s.role !== 'public';
+  if (!logged) {
+    nav.innerHTML = `<a href="#/" class="${cur === '' ? 'on' : ''}">소개</a><a href="#/join" class="${cur === 'join' ? 'on' : ''}">입단 안내</a>`;
     tab.hidden = true;
     return;
   }
-  const cur = r[0] || '';
-  const news = open ? newNotices(ctx.parent.bundle).length : 0;
-  const items = open ? [...PARENT_NAV.slice(0, 1), ['notices', '공지', 'bell'], ...PARENT_NAV.slice(1)] : [];
+  const news = s.bundle ? newNotices(s.bundle).length : 0;
+  const items = [['', '소개'], ...PARENT_NAV.slice(0, 1), ['notices', '공지'], ...PARENT_NAV.slice(1)];
+  if (s.has('staff')) items.push(['staff', '스탭']);
+  if (s.role === 'admin') items.push(['admin', '관리']);
   nav.innerHTML = items.map(([h, l]) => `<a href="#/${h}" class="${cur === h ? 'on' : ''}">${l}${h === 'notices' && news ? ' <span class="badge-new">N</span>' : ''}</a>`).join('');
-  tab.hidden = !open;
+  // 휴대폰 아래 메뉴 6칸: 학부모는 명단, 스탭은 명단 대신 스탭(연락처 명단 포함), 관리자는 영상 대신 관리
+  let tabs = PARENT_NAV.slice();
+  if (s.has('staff')) tabs = tabs.map(t => (t[0] === 'roster' ? ['staff', '스탭', 'people'] : t));
+  if (s.role === 'admin') tabs = tabs.map(t => (t[0] === 'videos' ? ['admin', '관리', 'gear'] : t));
+  tab.hidden = false;
   tab.className = 'tabbar';
-  tab.innerHTML = PARENT_NAV.map(([h, l, ic]) => `<a href="#/${h}" class="${cur === h ? 'on' : ''}">${icon(ic)}<span>${l}</span></a>`).join('');
+  tab.innerHTML = tabs.map(([h, l, ic]) => `<a href="#/${h}" class="${cur === h ? 'on' : ''}">${icon(ic)}<span>${l}</span></a>`).join('');
 }
 
 function paintTop(ctx) {
   const r = location.hash.replace(/^#\/?/, '').split('/');
   const el = $('#top-right');
-  if (r[0] === 'admin') {
-    const s = ctx.core.status();
-    if (!s.open) { el.innerHTML = ''; return; }
-    const label = { saved: '✓ 저장됨', pending: '이 기기에만 저장', syncing: '올리는 중…', offline: '인터넷 없음', error: '저장 오류', locked: '잠김' }[s.state] || s.state;
-    el.innerHTML = `<span class="state ${s.state}" title="${esc(s.error || '')}">${label}</span>`;
+  const s = ctx.session;
+  const st = ctx.core.status();
+  const state = s.role === 'admin' && st.open
+    ? `<span class="state ${st.state}" title="${esc(st.error || '')}">${{ saved: '✓ 저장됨', pending: '이 기기에만', syncing: '올리는 중…', offline: '인터넷 없음', error: '저장 오류', locked: '잠김' }[st.state] || st.state}</span>` : '';
+  if (s.role === 'public') {
+    el.innerHTML = r[0] === 'login' ? '' : '<a class="btn small primary" href="#/login">로그인</a>';
     return;
   }
-  if (ctx.parentState !== 'open') { el.innerHTML = ''; return; }
-  const news = newNotices(ctx.parent.bundle).length;
-  el.innerHTML = `<a class="icon-btn" href="#/notices" aria-label="공지${news ? ` 새 글 ${news}개` : ''}">${icon('bell')}${news ? '<span class="dot"></span>' : ''}</a>
-    <a class="icon-btn" href="#/admin" aria-label="관리자" title="관리자">${icon('gear')}</a>`;
+  const news = s.bundle ? newNotices(s.bundle).length : 0;
+  el.innerHTML = `${r[0] === 'admin' ? state : `<a class="icon-btn" href="#/notices" aria-label="공지${news ? ` 새 글 ${news}개` : ''}">${icon('bell')}${news ? '<span class="dot"></span>' : ''}</a>`}
+    <a class="icon-btn" href="#/logout" aria-label="로그아웃" title="로그아웃 (${esc(s.person?.name || '')})">${icon('lock')}</a>`;
 }
 
 // 관리자가 고친 뒤 20초 동안 더 고치지 않으면 학부모 화면에 저절로 반영
@@ -154,9 +188,9 @@ function schedulePublish(ctx) {
   pubT = setTimeout(async () => {
     try {
       const p = ctx.pub.parentRec();
-      if (!p?.ck || !navigator.onLine || !ctx.core.status().open) return;
+      if (!p?.k || !navigator.onLine || !ctx.core.status().open) return;
       const r = await ctx.pub.publish();
-      if (r.changed) toast('학부모 화면에 반영했어요.');
+      if (r.changed) { toast('학부모 화면에 반영했어요.'); await ctx.session.refreshAdmin(); }
       if (location.hash.startsWith('#/admin')) document.dispatchEvent(new CustomEvent('jc:published'));
     } catch (e) {
       if (e.code === 'contact-leak') toastErr(e);

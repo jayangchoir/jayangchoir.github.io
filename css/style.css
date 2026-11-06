@@ -388,3 +388,13 @@ table.tbl tr:hover td { background: #fafaff; cursor: pointer; }
 @media (min-width: 760px) { .only-wide { display: block; } .only-narrow { display: none; } }
 @media (min-width: 860px) { .quick { display: none; } .home-vid .yt { max-width: 640px; } }
 .lightbox { background: #0b0c18; }
+.pub-hero { padding: 28px 20px 24px; }
+.pub-hero h1 { font-size: 28px; }
+.btn.ghost-light { background: rgba(255, 255, 255, .16); border-color: rgba(255, 255, 255, .35); color: #fff; }
+.btn.ghost-light:hover { background: rgba(255, 255, 255, .26); }
+.pub-hero .btn:not(.ghost-light) { color: var(--brand-2); }
+#print-card { display: none; }
+@media print {
+  body.printing > *:not(#print-card) { display: none !important; }
+  body.printing #print-card { display: block; border: 2px dashed #888; border-radius: 14px; padding: 24px; width: 90mm; margin: 10mm; font-size: 15px; }
+}

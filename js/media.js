@@ -1,7 +1,7 @@
 // 사진·PDF 저장 — 공개 사진 저장소 jayangchoir/choir-photos-1, -2, … (personal-hub 의 my-files-N 과 같은 방식)
 //
 // - 파일마다 무작위 키로 암호화해서 올린다(tier.js). 키는 관리자 데이터(media 목록, 비공개·암호화)와
-//   학부모용 묶음(학부모 비밀번호로 암호화)에만 있다. 저장소는 공개라 토큰 없이 raw.githubusercontent.com 으로 읽는다.
+//   학부모용 묶음(학부모 열쇠로 암호화)에만 있다. 저장소는 공개라 토큰 없이 raw.githubusercontent.com 으로 읽는다.
 // - 저장소 하나가 약 900MB 가 되면 다음 저장소를 토큰으로 자동으로 만든다 (GitHub 권장: 저장소 1GB 이하).
 // - 파일은 8MB 씩 나눠 조각마다 따로 암호화한다 (GitHub 파일 하나 100MB 제한, contents API 도 작은 조각이 안전).
 //   경로: m/<yyyy-mm>/<파일id>/<조각 번호>, 작은 그림(사진 목록용)은 m/<yyyy-mm>/<파일id>/t

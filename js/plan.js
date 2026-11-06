@@ -84,6 +84,11 @@ export async function applyPlan(plan, { core, uploads = null, media = null, onSt
     const next = fill(prev, { ...plan.site, id: 'site' });
     if (next) { await col('settings').put(next); bump('site'); }
   }
+  if (plan.public && Object.keys(plan.public).length) {
+    const prev = col('settings').get('public');
+    const next = fill(prev, { ...plan.public, id: 'public' });
+    if (next) { await col('settings').put(next); bump('public'); }
+  }
   onStep('공지');
   await upsert('notices', plan.notices, ids.notice);
   onStep('일정');

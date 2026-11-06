@@ -59,24 +59,40 @@ async function run(tag, w, h, mobile) {
     await ctx.uploads.kick();
   })()`);
   await page.waitFor('window.__demo.ctx.uploads.snapshot().siteDone === 10', 60000);
-  // 학부모 비밀번호 정하기 + 반영
-  await page.eval(`window.__demo.ctx.pub.setParentPassword(${JSON.stringify(PW)}).then(() => window.__demo.ctx.render())`);
+  // 가족 코드(명단으로) + 예시 스탭 코드 → 반영
+  await page.eval(`(async () => { const ctx = window.__demo.ctx;
+    for (const f of ctx.pub.suggestFamilies()) await ctx.pub.issue(f);
+    await ctx.pub.issue({ name: '(예시) 스탭', login: '예시스탭', role: 'staff', labels: ['총무'] });
+    await ctx.pub.publish(); await ctx.session.refreshAdmin(); ctx.render(); })()`);
   await go('#/admin');
-  await page.waitFor('document.querySelector(".publish-bar.ok")', 20000);
+  await page.waitFor('document.querySelector(".publish-bar.ok")', 60000);
   await shot('admin-dashboard');
+  await go('#/admin/access');
+  await page.waitFor('document.querySelector("[data-inv]")');
+  await shot('admin-access');
+  await page.eval(`document.querySelector('[data-inv]').click()`);
+  await page.waitFor('document.querySelector("#inv")');
+  { const p = join(outDir, `${tag}-admin-invite.png`); await new Promise(r => setTimeout(r, 500)); await page.shot(p, { full: false }); shots.push(p); }
+  await page.eval(`document.querySelector('#modal [data-close]').click()`);
   await go('#/admin/members');
-  await page.waitFor('document.querySelector("table.tbl")');
+  await page.waitFor('document.querySelector(".mcards, table.tbl")');
   await shot('admin-roster');
-  // 학부모: 로그인 화면
-  await page.eval('window.__demo.ctx.logoutParent()');
-  await go('#/');
+  const fam = await page.eval(`(() => { const p = window.__demo.core.collection('people').list().find(x => x.role === 'parent'); return { login: p.login, code: p.code }; })()`);
+  const stf = await page.eval(`(() => { const p = window.__demo.core.collection('people').list().find(x => x.role === 'staff'); return { login: p.login, code: p.code }; })()`);
+  // 로그아웃 → 공개 첫 화면
+  await go('#/logout');
+  await page.waitFor('location.hash === "#/" && document.querySelector(".pub-hero")', 20000);
+  await shot('public-home');
+  await go('#/join');
+  await shot('public-join');
+  // 하나뿐인 로그인 화면: 가족 코드
+  await go('#/login');
   await page.waitFor('document.querySelector("#login-form")');
-  await shot('parent-login');
-  // 틀린 비밀번호
-  await page.eval(`document.querySelector('#ppw').value = 'wrong-password-1'; document.querySelector('#login-form').requestSubmit();`);
+  await shot('login');
+  await page.eval(`document.querySelector('#lid').value = ${JSON.stringify(fam.login)}; document.querySelector('#lpw').value = 'WRNG-CODE-XXXX'; document.querySelector('#login-form').requestSubmit();`);
   await page.waitFor('document.querySelector("#login-msg .err")', 20000);
-  await page.eval(`document.querySelector('#ppw').value = ${JSON.stringify(PW)}; document.querySelector('#login-form').requestSubmit();`);
-  await page.waitFor('document.querySelector(".hero")', 20000);
+  await page.eval(`document.querySelector('#lpw').value = ${JSON.stringify(fam.code.toLowerCase())}; document.querySelector('#login-form').requestSubmit();`);
+  await page.waitFor('location.hash === "#/home" && document.querySelector(".next, .quick")', 20000);
   await page.waitFor('document.querySelectorAll("#home-strip img.ld").length >= 3', 20000).catch(() => {});
   await shot('parent-home');
   await go('#/schedule');
@@ -85,15 +101,13 @@ async function run(tag, w, h, mobile) {
   await shot('parent-calendar');
   await go('#/songs');
   await shot('parent-songs');
-  // 악보 PDF 열기 (이 기기에서 풀어 blob: 주소로)
   await page.eval(`document.querySelector('[data-open]').click()`);
   await page.waitFor('document.querySelector("#pdf-body a[download]")', 20000);
-  const pdfOk = await page.eval(`(async () => { const a = document.querySelector('#pdf-body a[download]'); const P = window.__demo.parent; const id = document.querySelector('[data-open]').dataset.open;
-    const blob = await P.file(id, P.bundle.files[id]); return [a.getAttribute('download'), new TextDecoder().decode(new Uint8Array(await blob.arrayBuffer()).slice(0, 5)), a.href.slice(0, 5)]; })()`);
+  const pdfOk = await page.eval(`(async () => { const a = document.querySelector('#pdf-body a[download]'); const S = window.__demo.session; const id = document.querySelector('[data-open]').dataset.open;
+    const blob = await S.file(id, S.bundle.files[id]); return [a.getAttribute('download'), new TextDecoder().decode(new Uint8Array(await blob.arrayBuffer()).slice(0, 5)), a.href.slice(0, 5)]; })()`);
   console.log(`[${tag}] PDF 열기: ${JSON.stringify(pdfOk)}`);
   if (pdfOk[1] !== '%PDF-') bad++;
-  await new Promise(r => setTimeout(r, 800));
-  { const p = join(outDir, `${tag}-parent-pdf.png`); await page.shot(p, { full: false }); shots.push(p); }
+  { await new Promise(r => setTimeout(r, 800)); const p = join(outDir, `${tag}-parent-pdf.png`); await page.shot(p, { full: false }); shots.push(p); }
   await page.eval(`document.querySelector('#modal [data-close]').click()`);
   await go('#/videos');
   await shot('parent-videos');
@@ -108,16 +122,48 @@ async function run(tag, w, h, mobile) {
   await page.waitFor('document.querySelector(".lightbox img") && document.querySelector(".lightbox img").src.startsWith("blob:")', 20000).catch(() => {});
   await shot('parent-lightbox');
   await page.eval(`document.querySelector('.lightbox [data-x]').click()`);
-  await go('#/roster');
-  await shot('parent-roster');
   await go('#/notices');
   await shot('parent-notices');
-  // 학부모 명단 화면에 연락처가 없는지 (화면 글자로도 확인)
   await go('#/roster');
+  await shot('parent-roster');
   const txt = await page.eval('document.body.innerText');
   // 비밀 값은 준비된 자료 파일에서 읽는다 (이 파일에 개인정보를 적지 않으려고)
   const leaked = secrets.filter(v => txt.includes(v) || txt.replace(/\D/g, ' ').includes(v));
   if (leaked.length || /01[016789][-\s]?\d{3,4}[-\s]?\d{4}/.test(txt)) { console.log(`[${tag}] ✕ 학부모 명단 화면에 연락처·부모님 이름이 보여요 (${leaked.length}개)`); bad++; }
+  const staffLink = await page.eval('!!document.querySelector(\'a[href="#/staff"]\')');
+  if (staffLink) { console.log(`[${tag}] ✕ 학부모에게 스탭 메뉴가 보여요`); bad++; }
+  // 스탭 코드로 로그인
+  await go('#/logout');
+  await page.waitFor('location.hash === "#/"', 20000);
+  await go(`#/login/${encodeURIComponent(stf.login)}`);
+  await page.waitFor('document.querySelector("#login-form")');
+  await page.eval(`document.querySelector('#lpw').value = ${JSON.stringify(stf.code)}; document.querySelector('#login-form').requestSubmit();`);
+  await page.waitFor('location.hash === "#/home"', 20000);
+  await page.eval(`(async () => { const ctx = window.__demo.ctx; const { createStaffStore } = await import('./js/staff.js');
+    const st = createStaffStore({ session: ctx.session, backendFor: (t, d) => window.__demo.gh.client(t, d) });
+    const pdf = new TextEncoder().encode('%PDF-1.4 (예시) 회의 자료');
+    const att = await st.attach([new File([pdf], '(예시) 11월 회의 안건.pdf', { type: 'application/pdf' })]);
+    await st.put('meetings', { title: '(예시) 11월 스탭 회의', date: '2026-11-08', body: '이웃 초청 음악회 준비\\n· 단복 점검\\n· 간식 당번 정하기', attachments: att });
+    await st.put('snacks', { date: '2026-11-15', who: '(예시) 가족', items: '귤, 물', note: '연습 끝나고' });
+    await st.put('snacks', { date: '2026-11-29', who: '(예시) 가족 2', items: '빵 40개', note: '' }); })()`);
+  await go('#/staff');
+  await page.waitFor('document.querySelector(".mcards")', 20000);
+  await shot('staff-contacts');
+  await go('#/staff/meetings');
+  await page.waitFor('document.querySelector("[data-edit]")', 20000);
+  await shot('staff-meetings');
+  await go('#/staff/snacks');
+  await page.waitFor('document.querySelector(".rowi")', 20000);
+  await shot('staff-snacks');
+  const stxt = await page.eval('document.body.innerText');
+  if (!/010[-\s]?\d{3,4}/.test(stxt) && !/010/.test(await page.eval(`(async () => { location.hash = '#/staff'; await new Promise(r => setTimeout(r, 600)); return document.body.innerText; })()`))) { console.log(`[${tag}] ✕ 스탭에게 연락처가 안 보여요`); bad++; }
+  // 관리자도 같은 로그인 화면에서 (관리자 비밀번호)
+  await go('#/logout');
+  await page.waitFor('location.hash === "#/"', 20000);
+  await go('#/login');
+  await page.waitFor('document.querySelector("#login-form")');
+  await page.eval(`document.querySelector('#lid').value = '총무'; document.querySelector('#lpw').value = 'admin-pass-2026'; document.querySelector('#login-form').requestSubmit();`);
+  await page.waitFor('location.hash === "#/admin" && document.querySelector(".admin-tabs")', 20000);
   const probs = page.problems.filter(p => !/i\.ytimg\.com/.test(p));
   if (page.problems.length) console.log(`[${tag}] 문제:\n  ${page.problems.join('\n  ')}`);
   if (probs.length) bad++;
