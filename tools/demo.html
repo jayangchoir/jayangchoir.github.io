@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="robots" content="noindex, nofollow">
+  <!-- 개발용 데모: 실제 GitHub 대신 이 탭의 메모리에 있는 가짜 저장소를 쓴다 (새로고침하면 사라짐). 화면 찍기(tools/shots.mjs)용 -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data: https://i.ytimg.com; font-src 'self'; media-src 'self' blob:; connect-src 'self'; frame-src blob: https://www.youtube-nocookie.com; object-src blob:; worker-src 'none'; base-uri 'self'; form-action 'none'">
+  <base href="../">
+  <title>자양교회 어린이 합창단 (데모)</title>
+  <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <a class="brand" href="#/"><img src="assets/icon.svg" alt=""><span>자양교회 <b>어린이 합창단</b></span></a>
+      <nav id="nav" class="nav" aria-label="메뉴"></nav>
+      <div id="top-right" class="top-right"></div>
+    </header>
+    <main id="view" class="view" tabindex="-1"></main>
+    <nav id="tabbar" class="tabbar" aria-label="메뉴"></nav>
+  </div>
+  <div id="uploads" class="uploads" hidden></div>
+  <dialog id="modal" class="modal"><div id="modal-body"></div></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <script type="module" src="tools/demo.js"></script>
+</body>
+</html>

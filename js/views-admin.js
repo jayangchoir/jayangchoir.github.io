@@ -1,0 +1,715 @@
+// 관리자 화면 — 임원(관리자)만. 관리자 비밀번호로 연 core(비공개 저장소)의 모든 내용을 고친다.
+// 연락처(부모님 이름·전화·비고·예금주·문의 연락처)는 여기서만 보인다.
+import { esc, textHtml, icon, toast, toastErr, modal, closeModal, confirmBox, busy, dateKo, dateDot, size, timeAgo, download, ymd, copyText } from './ui.js';
+import { weakReasons, suggestPassword } from './tier.js';
+import { applyPlan, ids } from './plan.js';
+import { sortMembers, SITE_PRIVATE } from './bundle.js';
+import { PDF_WARN, PDF_MAX, repoName, toEntry } from './media.js';
+import { kindOf } from './uploads.js';
+import { ACCOUNT_HINT } from './google.js';
+
+const TABS = [['', '대시보드'], ['notices', '공지'], ['events', '일정'], ['songs', '연주곡'], ['videos', '영상'], ['albums', '사진'], ['members', '명단'], ['site', '안내'], ['import', '가져오기'], ['settings', '설정']];
+const GRADES = ['1', '2', '3', '4', '5', '6', '중1', '중2', '중3'];
+const PRIV = '<span class="chip rose">관리자만</span>';
+
+// ---------- 목록마다 칸 ----------
+const SCHEMA = {
+  notices: {
+    name: '공지', attach: true,
+    fields: [
+      { k: 'title', l: '제목', req: true },
+      { k: 'date', l: '날짜', t: 'date', def: () => ymd() },
+      { k: 'body', l: '내용', t: 'textarea', rows: 7 },
+      { k: 'pinned', l: '맨 위에 고정', t: 'check' },
+    ],
+    sort: (a, b) => Number(!!b.pinned) - Number(!!a.pinned) || String(b.date).localeCompare(String(a.date)),
+    row: r => `<b>${r.pinned ? `${icon('pin')} ` : ''}${esc(r.title)}</b><small>${esc(dateKo(r.date, { dow: false }))} · ${esc(String(r.body || '').slice(0, 60))}</small>`,
+  },
+  events: {
+    name: '일정', attach: true,
+    fields: [
+      { k: 'date', l: '날짜', t: 'date', req: true, def: () => ymd() },
+      { k: 'title', l: '무엇', req: true, ph: '예: 연습, 오후예배 찬양, 이웃 초청 음악회' },
+      { k: 'kind', l: '종류', t: 'select', opts: [['practice', '연습'], ['perf', '공연·찬양'], ['etc', '그 밖의 일정']] },
+      { k: 'time', l: '시간', ph: '예: 11:30~12:30 (모르면 미정)' },
+      { k: 'place', l: '장소', ph: '예: 초등부실, 본당' },
+      { k: 'note', l: '비고', t: 'textarea', rows: 2, ph: '예: ‘주품에’ 외 1곡' },
+      { k: 'end', l: '끝나는 날 (여러 날일 때만)', t: 'date' },
+    ],
+    sort: (a, b) => String(b.date).localeCompare(String(a.date)),
+    row: r => `<b>${esc(r.title)} ${r.kind === 'perf' ? '<span class="chip sun">공연</span>' : ''}</b><small>${esc(dateKo(r.date, { year: true }))}${r.time ? ` · ${esc(r.time)}` : ''}${r.place ? ` · ${esc(r.place)}` : ''}</small>`,
+  },
+  songs: {
+    name: '연주곡', attach: true, accept: 'application/pdf,image/*',
+    fields: [
+      { k: 'group', l: '공연·묶음', req: true, ph: '예: 26’ 11/11 이웃 초청 음악회', list: 'groups' },
+      { k: 'title', l: '곡 이름', req: true },
+      { k: 'date', l: '공연 날짜', t: 'date' },
+      { k: 'order', l: '순서 (묶음 안에서)', t: 'number' },
+      { k: 'audio', l: '연습 음원 (구글 드라이브 링크 등)', t: 'links' },
+      { k: 'videos', l: '참고 영상 (유튜브 링크)', t: 'links' },
+      { k: 'note', l: '메모 (파트·가사 등)', t: 'textarea', rows: 4 },
+    ],
+    sort: (a, b) => String(b.date || '').localeCompare(String(a.date || '')) || String(a.group).localeCompare(String(b.group)) || (a.order ?? 0) - (b.order ?? 0),
+    row: (r, ctx) => {
+      const n = ctx.media.forOwner(`songs:${r.id}`).length;
+      const waiting = (r.scoreFiles || []).length && !n;
+      return `<b>${esc(r.title)}</b><small>${esc(r.group || '')}${r.date ? ` · ${esc(dateDot(r.date))}` : ''} · 악보 ${n} · 음원 ${(r.audio || []).length} · 영상 ${(r.videos || []).length}${waiting ? ' · <span style="color:#a86400">노션 악보 가져오기 전</span>' : ''}</small>`;
+    },
+  },
+  videos: {
+    name: '영상',
+    fields: [
+      { k: 'kind', l: '종류', t: 'select', opts: [['perf', '공연 영상'], ['practice', '연습 영상']] },
+      { k: 'date', l: '날짜', t: 'date', req: true, def: () => ymd() },
+      { k: 'title', l: '제목', req: true },
+      { k: 'urls', l: '유튜브 주소 (한 줄에 하나)', t: 'lines', req: true },
+      { k: 'note', l: '메모', t: 'textarea', rows: 2 },
+    ],
+    sort: (a, b) => String(b.date).localeCompare(String(a.date)),
+    row: r => `<b>${esc(r.title)}</b><small>${r.kind === 'practice' ? '연습' : '공연'} · ${esc(dateDot(r.date))} · 영상 ${(r.urls || []).length}개</small>`,
+  },
+  albums: {
+    name: '사진첩',
+    fields: [
+      { k: 'title', l: '행사 이름', req: true, ph: '예: 이웃 초청 음악회' },
+      { k: 'date', l: '날짜', t: 'date', req: true, def: () => ymd() },
+      { k: 'note', l: '설명', t: 'textarea', rows: 2 },
+      { k: 'hidden', l: '학부모 화면에 숨기기', t: 'check' },
+    ],
+    sort: (a, b) => String(b.date).localeCompare(String(a.date)),
+  },
+  members: {
+    name: '단원',
+    fields: [
+      { k: 'name', l: '이름', req: true },
+      { k: 'grade', l: '학년', t: 'select', opts: GRADES.map(g => [g, /^\d/.test(g) ? `${g}학년` : g]) },
+      { k: 'gender', l: '성별', t: 'select', opts: [['', '-'], ['남', '남'], ['여', '여']], priv: true },
+      { k: 'parentName', l: '부모님', priv: true },
+      { k: 'phone', l: '연락처', t: 'tel', priv: true },
+      { k: 'note', l: '비고', priv: true },
+      { k: 'joined', l: '입단', priv: true, ph: "예: 26' 2/1" },
+      { k: 'order', l: '순서', t: 'number' },
+    ],
+    sort: (a, b) => 0,
+  },
+};
+const SITE_FIELDS = [
+  { k: 'title', l: '합창단 이름' },
+  { k: 'welcome', l: '환영 글 (첫 화면 위)', t: 'textarea', rows: 2 },
+  { k: 'intro', l: '소개 (명단 위: 지도·반주·단원 수)' },
+  { k: 'practiceTime', l: '정기 연습 시간', ph: '예: 주일 11:30~12:30' },
+  { k: 'practicePlace', l: '정기 연습 장소' },
+  { k: 'activity', l: '활동 안내', t: 'textarea', rows: 5 },
+  { k: 'fees', l: '회비 안내', t: 'textarea', rows: 4 },
+  { k: 'bankName', l: '은행' },
+  { k: 'bankAccount', l: '계좌번호 (학부모에게 보임)' },
+  { k: 'accountHolder', l: '예금주', priv: true },
+  { k: 'contactNote', l: '문의 안내 (학부모에게 보임, 전화번호는 넣지 마세요)' },
+  { k: 'contactName', l: '문의 담당자 이름', priv: true },
+  { k: 'contactPhone', l: '문의 전화', t: 'tel', priv: true },
+  { k: 'youtube', l: '유튜브 채널 주소' },
+  { k: 'videoNote', l: '연습 영상 안내 문구', t: 'textarea', rows: 2 },
+];
+
+// ---------- 입력 칸 ----------
+function fieldHtml(f, v, ctx) {
+  const id = `f-${f.k}`;
+  const lab = `<span>${esc(f.l)}${f.req ? ' *' : ''}${f.priv ? ` ${PRIV}` : ''}</span>`;
+  const val = v ?? (f.def ? f.def() : '');
+  switch (f.t) {
+    case 'textarea': return `<label class="f">${lab}<textarea id="${id}" rows="${f.rows || 4}" placeholder="${esc(f.ph || '')}">${esc(val)}</textarea></label>`;
+    case 'check': return `<label class="check"><input id="${id}" type="checkbox"${val ? ' checked' : ''}> ${esc(f.l)}</label>`;
+    case 'select': return `<label class="f">${lab}<select id="${id}">${f.opts.map(([k, l]) => `<option value="${esc(k)}"${String(val) === k ? ' selected' : ''}>${esc(l)}</option>`).join('')}</select></label>`;
+    case 'lines': return `<label class="f">${lab}<textarea id="${id}" rows="3" placeholder="https://youtu.be/...">${esc((val || []).join('\n'))}</textarea></label>`;
+    case 'links': return `<div class="f links-edit" data-links="${f.k}">${lab}${(val || []).concat([{}]).map(x => linkRow(x)).join('')}<button type="button" class="btn small ghost" data-addlink>${icon('plus')} 줄 더하기</button></div>`;
+    default: {
+      const dl = f.list === 'groups' ? ` list="dl-groups"` : '';
+      const extra = f.list === 'groups' ? `<datalist id="dl-groups">${[...new Set(ctx.core.collection('songs').list().map(s => s.group).filter(Boolean))].map(g => `<option value="${esc(g)}">`).join('')}</datalist>` : '';
+      return `<label class="f">${lab}<input id="${id}" type="${f.t === 'date' ? 'date' : f.t === 'number' ? 'number' : f.t === 'tel' ? 'tel' : 'text'}" value="${esc(val)}" placeholder="${esc(f.ph || '')}"${dl}>${extra}</label>`;
+    }
+  }
+}
+const linkRow = x => `<div class="lrow"><input placeholder="이름 (예: 알토)" value="${esc(x.label || '')}" data-l="label"><input placeholder="https://..." value="${esc(x.url || '')}" data-l="url"><button type="button" class="icon-btn" data-dellink aria-label="이 줄 지우기">${icon('x')}</button></div>`;
+
+function readFields(root, fields) {
+  const out = {};
+  for (const f of fields) {
+    const el = root.querySelector(`#f-${f.k}`);
+    if (f.t === 'check') out[f.k] = !!el?.checked;
+    else if (f.t === 'number') out[f.k] = el?.value === '' ? undefined : Number(el.value);
+    else if (f.t === 'lines') out[f.k] = String(el?.value || '').split(/\s*\n\s*/).map(s => s.trim()).filter(Boolean);
+    else if (f.t === 'links') out[f.k] = [...root.querySelectorAll(`[data-links="${f.k}"] .lrow`)].map(r => ({ label: r.querySelector('[data-l=label]').value.trim(), url: r.querySelector('[data-l=url]').value.trim() })).filter(x => x.url);
+    else out[f.k] = String(el?.value ?? '').trim();
+  }
+  for (const f of fields) if (f.req && (out[f.k] == null || out[f.k] === '' || (Array.isArray(out[f.k]) && !out[f.k].length))) throw new Error(`"${f.l}" 칸을 채워 주세요.`);
+  return out;
+}
+function bindLinks(root) {
+  root.addEventListener('click', e => {
+    if (e.target.closest('[data-addlink]')) e.target.closest('[data-addlink]').insertAdjacentHTML('beforebegin', linkRow({}));
+    if (e.target.closest('[data-dellink]')) e.target.closest('.lrow').remove();
+  });
+}
+
+// ---------- 들어가기 (연결·잠금) ----------
+function connectScreen() {
+  return `<div class="login" style="max-width:560px">
+    <img class="logo" src="assets/icon.svg" alt=""><h1>관리자</h1>
+    <p class="muted">합창단 임원만 쓰는 곳이에요.</p>
+    <div class="card" style="text-align:left">
+      <h3>이미 연결된 기기가 있으면</h3>
+      <p class="small">그 기기의 관리자 화면 → 설정 → <b>새 기기 연결(QR)</b> 을 이 휴대폰 카메라로 찍으세요. 그다음 관리자 비밀번호를 넣으면 돼요.</p>
+    </div>
+    <details class="card" style="text-align:left"><summary><b>GitHub 토큰으로 연결</b> (모든 기기를 잃었을 때)</summary>
+      <form id="f-conn" style="margin-top:12px">
+        <label class="f"><span>GitHub 토큰</span><input id="c-token" type="password" autocomplete="off" required></label>
+        <label class="f"><span>관리자 비밀번호</span><input id="c-pw" type="password" autocomplete="current-password" required></label>
+        <label class="f"><span>내 이름 (고친 사람으로 남아요)</span><input id="c-name" required></label>
+        <button class="btn primary block">연결</button><div class="msg"></div></form></details>
+    <details class="card" style="text-align:left"><summary><b>처음 설정</b> (합창단에서 딱 한 번)</summary>
+      <form id="f-setup" style="margin-top:12px">
+        <p class="small">비어 있는 비공개 저장소 <b>jayangchoir/jayangchoir-data</b> 에 암호화된 관리자 데이터를 만들어요. 자세한 순서는 README 의 "처음 한 번" 을 보세요.</p>
+        <label class="f"><span>GitHub 토큰</span><input id="s-token" type="password" autocomplete="off" required></label>
+        <label class="f"><span>관리자 비밀번호 (8자 이상, 임원끼리만)</span><input id="s-pw" type="password" autocomplete="new-password" required minlength="8"></label>
+        <label class="f"><span>한 번 더</span><input id="s-pw2" type="password" autocomplete="new-password" required></label>
+        <label class="f"><span>내 이름</span><input id="s-name" required></label>
+        <button class="btn primary block">처음 설정</button><div class="msg"></div></form></details>
+    <details class="card" style="text-align:left"><summary><b>복구 코드로 열기</b> (관리자 비밀번호를 모두 잊었을 때)</summary>
+      <form id="f-rec0" style="margin-top:12px">
+        <label class="f"><span>복구 코드</span><input id="r0-code" autocomplete="off" required placeholder="ABCD-EFGH-…"></label>
+        <label class="f"><span>새 관리자 비밀번호</span><input id="r0-pw" type="password" autocomplete="new-password" required minlength="8"></label>
+        <label class="f"><span>GitHub 토큰</span><input id="r0-token" type="password" autocomplete="off" required></label>
+        <button class="btn primary block">복구</button><div class="msg"></div></form></details>
+    <p><a href="#/">← 학부모 화면</a></p></div>`;
+}
+
+function unlockScreen(ctx) {
+  const s = ctx.core.status();
+  return `<div class="login">
+    <img class="logo" src="assets/icon.svg" alt=""><h1>관리자</h1>
+    ${s.errorCode === 'password-changed' ? '<div class="warn">다른 기기에서 관리자 비밀번호가 바뀌었어요. 새 비밀번호로 열어 주세요.</div>' : ''}
+    <form id="f-unlock" class="card" style="text-align:left">
+      <input type="text" name="username" value="관리자" autocomplete="username" hidden>
+      <label class="f"><span>관리자 비밀번호</span><input id="u-pw" type="password" autocomplete="current-password" required></label>
+      <label class="check"><input id="u-rem" type="checkbox"> 이 기기에서 30일 동안 열어 두기 (내 휴대폰만)</label>
+      <button class="btn primary block">열기</button><div class="msg"></div>
+    </form>
+    <details class="card" style="text-align:left"><summary>비밀번호를 잊었어요</summary>
+      <form id="f-rec" style="margin-top:12px">
+        <label class="f"><span>복구 코드</span><input id="r-code" autocomplete="off" required></label>
+        <label class="f"><span>새 관리자 비밀번호</span><input id="r-pw" type="password" autocomplete="new-password" required minlength="8"></label>
+        <button class="btn primary block">복구하고 열기</button><div class="msg"></div></form></details>
+    <p><a href="#/">← 학부모 화면</a></p></div>`;
+}
+
+async function showRecovery(code) {
+  await modal(`<div><h2>복구 코드</h2>
+    <p>관리자 비밀번호를 모두 잊었을 때 쓰는 <b>유일한</b> 방법이에요. 종이에 적어 인수인계 봉투에 넣어 두세요. 다시 볼 수 없어요.</p>
+    <div class="code-box">${esc(code)}</div>
+    <label class="check" style="margin-top:14px"><input type="checkbox" id="rc-ok"> 적어 두었어요</label>
+    <div class="row end"><button class="btn primary" id="rc-close" disabled>닫기</button></div></div>`, {
+    onOpen: (b, close) => {
+      b.querySelector('#rc-ok').onchange = e => { b.querySelector('#rc-close').disabled = !e.target.checked; };
+      b.querySelector('#rc-close').onclick = () => close();
+    },
+  });
+}
+
+function bindGate(ctx, view) {
+  const form = (id, fn) => {
+    const f = view.querySelector(id);
+    if (!f) return;
+    f.onsubmit = async e => {
+      e.preventDefault();
+      const msg = f.querySelector('.msg');
+      msg.innerHTML = '';
+      await busy(f.querySelector('button.primary'), '잠시만요…', async () => {
+        try { await fn(f); } catch (err) { msg.innerHTML = `<div class="err">${esc(err.message)}</div>`; }
+      });
+    };
+  };
+  const v = id => view.querySelector(id).value;
+  form('#f-unlock', async () => { await ctx.core.open(v('#u-pw'), { remember: view.querySelector('#u-rem').checked }); afterOpen(ctx); });
+  form('#f-conn', async () => { await ctx.core.connectWithToken(v('#c-token').trim(), v('#c-pw')); await ctx.core.setUser(v('#c-name')); afterOpen(ctx); });
+  form('#f-setup', async () => {
+    if (v('#s-pw') !== v('#s-pw2')) throw new Error('두 비밀번호가 달라요.');
+    const code = await ctx.core.setup(v('#s-token').trim(), v('#s-pw'), { user: v('#s-name') });
+    await showRecovery(code);
+    afterOpen(ctx, '#/admin');
+  });
+  form('#f-rec', async () => { await ctx.core.recover(v('#r-code'), v('#r-pw')); toast('새 비밀번호로 열었어요. 다른 기기도 새 비밀번호로 열어 주세요.'); afterOpen(ctx); });
+  form('#f-rec0', async () => { await ctx.core.recover(v('#r0-code'), v('#r0-pw'), v('#r0-token').trim()); afterOpen(ctx); });
+}
+function afterOpen(ctx, to) {
+  ctx.uploads.resume();
+  if (to) ctx.go(to); else ctx.render();
+}
+
+// ---------- 본체 ----------
+export async function adminView(ctx, view, r) {
+  const s = ctx.core.status();
+  document.title = '관리자 · 자양교회 어린이 합창단';
+  if (!s.connected) { view.innerHTML = connectScreen(); bindGate(ctx, view); return; }
+  if (!s.open) { view.innerHTML = unlockScreen(ctx); bindGate(ctx, view); setTimeout(() => view.querySelector('#u-pw')?.focus(), 50); return; }
+  const tab = r[0] || '';
+  const tabs = `<nav class="admin-tabs" aria-label="관리자 메뉴">${TABS.map(([k, l]) => `<a href="#/admin${k ? `/${k}` : ''}" class="${tab === k ? 'on' : ''}">${l}</a>`).join('')}</nav>`;
+  view.innerHTML = `${tabs}<div id="pub-bar"></div><div id="adm"></div>
+    <button class="fab" id="fab" aria-label="빠른 추가" title="빠른 추가">${icon('plus')}</button>`;
+  const body = view.querySelector('#adm');
+  paintPublishBar(ctx, view.querySelector('#pub-bar'));
+  view.querySelector('#fab').onclick = () => quickAdd(ctx);
+  view.querySelector('.admin-tabs a.on')?.scrollIntoView({ inline: 'center', block: 'nearest' });
+  ctx.uploads.kick();
+  switch (tab) {
+    case '': return dashboard(ctx, body);
+    case 'albums': return r[1] ? albumDetail(ctx, body, r[1]) : albumList(ctx, body);
+    case 'members': return membersView(ctx, body);
+    case 'site': return siteView(ctx, body);
+    case 'import': return importView(ctx, body);
+    case 'settings': return settingsView(ctx, body);
+    case 'trash': return trashView(ctx, body);
+    default:
+      if (SCHEMA[tab]) return listView(ctx, body, tab);
+      body.innerHTML = '<div class="card empty">없는 화면이에요.</div>';
+  }
+}
+
+async function paintPublishBar(ctx, el) {
+  if (!el?.isConnected) return;
+  let st;
+  try { st = await ctx.pub.state(); } catch (e) { el.innerHTML = ''; return; }
+  if (!st.configured) {
+    el.innerHTML = `<div class="publish-bar"><span class="grow">학부모 비밀번호를 아직 정하지 않았어요. 정하면 학부모 화면이 열려요.</span><a class="btn small primary" href="#/admin">정하기</a></div>`;
+    return;
+  }
+  el.innerHTML = st.dirty
+    ? `<div class="publish-bar"><span class="grow">${icon('refresh')} 학부모 화면에 아직 반영 안 된 변경이 있어요 <span class="tiny muted">(20초 뒤 저절로)</span></span><button class="btn small primary" data-publish>지금 반영</button></div>`
+    : `<div class="publish-bar ok"><span class="grow">${icon('check')} 학부모 화면과 같아요 <span class="tiny muted">${st.publishedAt ? `· ${esc(timeAgo(st.publishedAt))} ${esc(st.publishedBy)}` : ''}</span></span></div>`;
+  el.querySelector('[data-publish]')?.addEventListener('click', e => doPublish(ctx, e.currentTarget));
+  const again = () => { document.removeEventListener('jc:published', again); paintPublishBar(ctx, el); };
+  document.addEventListener('jc:published', again);
+}
+
+async function doPublish(ctx, btn) {
+  await busy(btn, '반영 중…', async () => {
+    try {
+      const r = await ctx.pub.publish();
+      toast(r.changed ? '학부모 화면에 반영했어요. 1~2분 뒤 보여요.' : '이미 같아요.');
+      ctx.render();
+    } catch (e) { toastErr(e); }
+  });
+}
+
+// ---------- 대시보드: 학부모 화면 · 비밀번호 · 저장 공간 ----------
+async function dashboard(ctx, body) {
+  const p = ctx.pub.parentRec();
+  const usage = ctx.media.usage();
+  const total = usage.reduce((n, u) => n + u.bytes, 0);
+  const counts = ['notices', 'events', 'songs', 'videos', 'albums', 'members'].map(c => [c, ctx.core.collection(c).list().length]);
+  const weak = p?.password ? weakReasons(p.password) : [];
+  body.innerHTML = `
+    <h1>관리자</h1><p class="muted small">${esc(ctx.core.status().user || '')}님 · ${esc(ctx.core.status().repo)}</p>
+    <div class="card">
+      <h2>학부모 화면</h2>
+      ${p?.ck ? `<p class="small">학부모 비밀번호: <b id="ppw-show">••••••••</b> <button class="btn small ghost" id="ppw-reveal">보기</button> <button class="btn small ghost" id="ppw-copy">${icon('copy')}복사</button></p>
+        ${weak.length ? `<div class="warn"><b>약한 비밀번호예요.</b> 학부모 화면 암호문은 누구나 받을 수 있어서, 약한 비밀번호는 컴퓨터로 맞힐 수 있어요.<br>${weak.map(esc).join(' ')}</div>` : ''}
+        <div class="row"><button class="btn primary" data-publish>${icon('refresh')} 학부모 화면에 반영</button><button class="btn soft" id="preview">학부모 화면 보기</button><button class="btn ghost" id="ppw-change">학부모 비밀번호 바꾸기</button></div>
+        <p class="help" style="margin-top:10px">마지막 반영: ${p.publishedAt ? `${esc(timeAgo(p.publishedAt))} (${esc(p.publishedBy || '')})` : '아직'}</p>`
+    : `<p>학부모가 볼 내용(공지·일정·연주곡·영상·사진·명단의 이름과 학년)은 <b>학부모 비밀번호</b>로 암호화되어 공개 사이트에 올라가요. 먼저 비밀번호를 정해 주세요.</p>
+        <button class="btn primary" id="ppw-change">학부모 비밀번호 정하기</button>`}
+    </div>
+    <div class="grid2">
+      <div class="card"><h3>내용</h3><div class="row">${counts.map(([c, n]) => `<a class="chip brand" href="#/admin/${c}">${esc(SCHEMA[c].name)} ${n}</a>`).join('')}</div>
+        <p class="help" style="margin-top:12px"><a href="#/admin/trash">휴지통</a> · <a href="#/admin/import">노션에서 가져오기</a></p></div>
+      <div class="card"><h3>사진·악보 저장 공간</h3>
+        ${usage.length ? usage.map(u => `<div style="margin-bottom:10px"><div class="row between small"><b>${esc(u.name)}</b><span>${size(u.bytes)} / ${size(u.limit)} · ${u.count}개</span></div><div class="bar"><i style="width:${Math.max(1, u.pct)}%"></i></div></div>`).join('')
+        + `<p class="help">모두 ${size(total)}. 저장소 하나가 ${size(ctx.media.limit)} 가 되면 다음 저장소(${esc(repoName(usage.length + 1))})를 저절로 만들어요.</p>`
+    : '<p class="small muted">아직 올린 사진·악보가 없어요. 처음 올릴 때 choir-photos-1 저장소를 만들어요.</p>'}</div>
+    </div>`;
+  body.querySelector('[data-publish]')?.addEventListener('click', e => doPublish(ctx, e.currentTarget));
+  body.querySelector('#ppw-reveal')?.addEventListener('click', () => { body.querySelector('#ppw-show').textContent = p.password; });
+  body.querySelector('#ppw-copy')?.addEventListener('click', () => copyText(p.password));
+  body.querySelector('#ppw-change')?.addEventListener('click', () => parentPasswordDialog(ctx));
+  body.querySelector('#preview')?.addEventListener('click', async e => {
+    await busy(e.currentTarget, '여는 중…', async () => {
+      try {
+        ctx.parentState = await ctx.parent.load();
+        if (ctx.parentState === 'none') throw new Error('아직 반영된 내용이 없어요. 먼저 반영해 주세요.');
+        if (ctx.parentState !== 'open') { await ctx.parent.login(p.password, { remember: true }); ctx.parentState = 'open'; }
+        ctx.go('#/');
+      } catch (err) { toastErr(err); }
+    });
+  });
+}
+
+async function parentPasswordDialog(ctx) {
+  const had = !!ctx.pub.parentRec()?.ck;
+  await modal(`<div><h2>학부모 비밀번호 ${had ? '바꾸기' : '정하기'}</h2>
+    <p class="small">모든 학부모가 같은 비밀번호를 써요. <b>10자 이상</b>, 흔한 낱말·숫자 나열이 아닌 것으로 정하세요. 휴대폰에서 치기 쉬운 "낱말-낱말-낱말-낱말-숫자" 모양을 추천해요.</p>
+    ${had ? '<div class="warn">바꾸면 모든 내용을 새 비밀번호로 다시 암호화해요. 학부모님들은 다음에 열 때 새 비밀번호를 넣어야 해요. (예전 비밀번호로 이미 받아 둔 예전 내용은 그 휴대폰에 남을 수 있어요.)</div>' : ''}
+    <label class="f"><span>새 학부모 비밀번호</span><input id="np" autocomplete="off" spellcheck="false"></label>
+    <div class="row" style="margin:-4px 0 10px"><button class="btn small soft" id="np-sug">추천 비밀번호</button></div>
+    <div id="np-weak"></div>
+    <div class="row end"><button class="btn ghost" data-close>취소</button><button class="btn primary" id="np-ok">${had ? '바꾸고 다시 반영' : '정하고 반영'}</button></div></div>`, {
+    onOpen: (b, close) => {
+      const inp = b.querySelector('#np');
+      const show = () => { const w = weakReasons(inp.value); b.querySelector('#np-weak').innerHTML = inp.value ? (w.length ? `<div class="warn"><b>약한 비밀번호예요.</b><br>${w.map(esc).join('<br>')}</div>` : '<div class="ok-box">좋아요. 충분히 강해요.</div>') : ''; };
+      inp.oninput = show;
+      b.querySelector('#np-sug').onclick = () => { inp.value = suggestPassword(); show(); };
+      b.querySelector('#np-ok').onclick = async e => {
+        const pw = inp.value.trim();
+        const w = weakReasons(pw);
+        if (w.length && !(await confirmBox(`약한 비밀번호예요:\n${w.join('\n')}\n\n그래도 이 비밀번호로 할까요?`, { ok: '그래도 쓰기', danger: true }))) return;
+        await modal(`<div><p><span class="spin"></span> 암호화해서 반영하는 중… (사진이 많으면 조금 걸려요)</p></div>`, {
+          onOpen: async (_, close2) => {
+            try { await ctx.pub.setParentPassword(pw); close2(); toast('학부모 비밀번호를 정하고 반영했어요.'); } catch (err) { close2(); toastErr(err); }
+            ctx.render();
+          },
+        });
+        void close; void e;
+      };
+    },
+  });
+}
+
+// ---------- 목록 (공지·일정·연주곡·영상) ----------
+function listView(ctx, body, col) {
+  const sc = SCHEMA[col];
+  const c = ctx.core.collection(col);
+  const list = c.list().sort(sc.sort);
+  body.innerHTML = `<div class="row between"><h1 style="margin:0">${esc(sc.name)}</h1><button class="btn primary" data-new>${icon('plus')} 새 ${esc(sc.name)}</button></div>
+    <p class="help" style="margin-top:8px">${list.length}개 · 누르면 고쳐요. 지우면 휴지통으로 가요(되살릴 수 있어요).</p>
+    <div class="card rows">${list.map(r => `<div class="rowi clickable" data-id="${esc(r.id)}"><div class="t">${sc.row(r, ctx)}</div>${r._conflicts?.length ? '<span class="chip sun" title="두 사람이 같은 때 고쳤어요">⚠ 확인</span>' : ''}${icon('right')}</div>`).join('') || '<div class="empty">아직 없어요.</div>'}</div>`;
+  body.querySelector('[data-new]').onclick = () => editRecord(ctx, col, null);
+  body.querySelector('.rows').onclick = e => { const row = e.target.closest('[data-id]'); if (row) editRecord(ctx, col, row.dataset.id); };
+}
+
+export async function editRecord(ctx, col, id, preset = {}) {
+  const sc = SCHEMA[col];
+  const c = ctx.core.collection(col);
+  const rec = id ? c.get(id) : { ...preset };
+  const atts = id && sc.attach ? ctx.media.forOwner(`${col}:${id}`) : [];
+  await modal(`<form id="ef"><div class="dlg-h"><h2>${esc(sc.name)} ${id ? '고치기' : '새로'}</h2><button type="button" class="icon-btn" data-close aria-label="닫기">${icon('x')}</button></div>
+    ${rec._conflicts?.length ? `<div class="warn"><b>두 사람이 같은 때 고친 내용이 있어요.</b> 지금 보이는 것이 나중에 고친 것이고, 다른 값은 아래와 같아요.<br>${rec._conflicts.map(x => `${esc(x.field)}: ${esc(typeof x.value === 'object' ? JSON.stringify(x.value) : String(x.value))} (${esc(x.by)})`).join('<br>')}<br><button type="button" class="btn small soft" id="clr-conf" style="margin-top:6px">확인했어요</button></div>` : ''}
+    ${sc.fields.map(f => fieldHtml(f, rec[f.k], ctx)).join('')}
+    ${col === 'songs' && (rec.scoreFiles || []).length ? `<p class="help">노션에 있던 악보: ${rec.scoreFiles.map(esc).join(', ')}</p>` : ''}
+    ${sc.attach ? `<div class="f"><span style="font-weight:700;color:var(--text-2);font-size:14px">첨부 (PDF·사진)</span>
+      <div id="atts" style="margin-top:6px">${atts.map(m => `<div class="att">${icon(m.kind === 'pdf' ? 'pdf' : 'photo')}<span class="grow">${esc(m.name)}</span><span class="tiny muted">${size(m.size)}</span><button type="button" class="icon-btn" data-delatt="${esc(m.id)}" aria-label="휴지통">${icon('trash')}</button></div>`).join('')}</div>
+      <label class="btn small soft" style="margin-top:4px">${icon('upload')} 파일 붙이기<input type="file" id="att-in" multiple accept="${esc(sc.accept || 'application/pdf,image/*')}" hidden></label> <span class="tiny muted" id="att-pick"></span></div>` : ''}
+    <div class="row between" style="margin-top:8px">${id ? `<button type="button" class="btn ghost" id="del" style="color:var(--danger)">${icon('trash')} 휴지통</button>` : '<span></span>'}
+      <div class="row"><button type="button" class="btn ghost" data-close>취소</button><button class="btn primary">저장</button></div></div></form>`, {
+    wide: col === 'songs',
+    onOpen: (b, close) => {
+      bindLinks(b);
+      let picked = [];
+      b.querySelector('#att-in')?.addEventListener('change', e => { picked = [...e.target.files]; b.querySelector('#att-pick').textContent = picked.length ? `${picked.length}개 고름 (저장하면 올려요)` : ''; });
+      b.querySelector('#clr-conf')?.addEventListener('click', async () => { await c.clearConflicts(id); close(); ctx.render(); });
+      b.querySelector('#atts')?.addEventListener('click', async e => {
+        const d = e.target.closest('[data-delatt]');
+        if (d && (await confirmBox('이 첨부를 휴지통에 넣을까요?'))) { await ctx.core.collection('media').softDelete(d.dataset.delatt); d.closest('.att').remove(); }
+      });
+      b.querySelector('#del')?.addEventListener('click', async () => {
+        if (await confirmBox(`이 ${sc.name}을(를) 휴지통에 넣을까요? 설정 → 휴지통에서 되살릴 수 있어요.`, { ok: '휴지통에 넣기', danger: true })) { await c.softDelete(id); close(); toast('휴지통에 넣었어요.'); ctx.render(); }
+      });
+      b.querySelector('#ef').onsubmit = async e => {
+        e.preventDefault();
+        try {
+          const vals = readFields(b, sc.fields);
+          const saved = id ? await c.patch(id, vals) : await c.put({ ...preset, ...vals });
+          if (picked.length) await startUpload(ctx, picked, `${col}:${saved.id}`, col === 'albums' ? { id: saved.id, title: saved.title, date: saved.date } : null);
+          close(saved);
+          toast('저장했어요.');
+          ctx.render();
+        } catch (err) { toastErr(err); }
+      };
+    },
+  });
+}
+
+// ---------- 올리기 ----------
+export async function startUpload(ctx, files, owner, album) {
+  files = [...files];
+  const big = files.filter(f => kindOf(f) === 'pdf' && f.size > PDF_WARN && f.size <= PDF_MAX);
+  const tooBig = files.filter(f => f.size > PDF_MAX);
+  if (tooBig.length) toastErr(new Error(`95MB 넘는 파일은 올릴 수 없어요: ${tooBig.map(f => f.name).join(', ')}`));
+  if (big.length && !(await confirmBox(`큰 PDF 가 있어요 (${big.map(f => `${f.name} ${size(f.size)}`).join(', ')}).\n학부모님 휴대폰에서 열 때 오래 걸릴 수 있어요. 그래도 올릴까요?`, { ok: '올리기' }))) return;
+  const ok = files.filter(f => f.size <= PDF_MAX);
+  if (!ok.length) return;
+  const g = ctx.core.collection('settings').get('google') || {};
+  const original = !!g.clientId && g.enabled !== false && ok.some(f => kindOf(f) === 'photo');
+  await ctx.uploads.add(ok, { owner, album, original });
+  toast(`${ok.length}개를 올리기 시작했어요. 화면을 닫지 말고 기다려 주세요.`);
+  if (original && !ctx.gAuth.signedIn()) {
+    ctx.gAuth.loadGis().catch(() => {});
+    const go = await confirmBox(`사진 원본을 Google 포토에 보관하려면 Google 에 로그인해야 해요.\n꼭 합창단 계정(${ACCOUNT_HINT})으로 로그인해 주세요.\n\n사이트에는 지금 바로 올라가요. 원본은 로그인한 뒤 올라가요.`, { ok: 'Google 로그인', cancel: '나중에' });
+    if (go) { try { await ctx.gAuth.signIn(); ctx.uploads.kick(); toast('Google 에 로그인했어요. 원본도 올려요.'); } catch (e) { toastErr(e); } }
+  }
+}
+
+// ---------- 빠른 추가 (휴대폰에서) ----------
+async function quickAdd(ctx) {
+  const v = await modal(`<div><div class="dlg-h"><h2>빠른 추가</h2><button class="icon-btn" data-close aria-label="닫기">${icon('x')}</button></div>
+    <div class="quick-add"><button data-close="event">${icon('cal')} 일정 추가</button><button data-close="notice">${icon('bell')} 공지 쓰기</button><button data-close="photos">${icon('photo')} 사진 올리기</button><button data-close="pdf">${icon('pdf')} 악보·자료 PDF 올리기</button></div></div>`);
+  if (v === 'event') editRecord(ctx, 'events', null);
+  else if (v === 'notice') editRecord(ctx, 'notices', null);
+  else if (v === 'photos') pickAlbumAndUpload(ctx);
+  else if (v === 'pdf') { const s = ctx.core.collection('songs').list().sort(SCHEMA.songs.sort); if (s.length) pickSongPdf(ctx, s); else editRecord(ctx, 'songs', null); }
+}
+
+async function pickAlbumAndUpload(ctx, albumId) {
+  const albums = ctx.core.collection('albums').list().sort(SCHEMA.albums.sort);
+  await modal(`<div><div class="dlg-h"><h2>사진 올리기</h2><button class="icon-btn" data-close aria-label="닫기">${icon('x')}</button></div>
+    <label class="f"><span>어느 사진첩에?</span><select id="qa-alb"><option value="">+ 새 사진첩</option>${albums.map(a => `<option value="${esc(a.id)}"${a.id === albumId ? ' selected' : ''}>${esc(dateDot(a.date))} ${esc(a.title)}</option>`).join('')}</select></label>
+    <div id="qa-new">${fieldHtml(SCHEMA.albums.fields[0], '', ctx)}${fieldHtml(SCHEMA.albums.fields[1], undefined, ctx)}</div>
+    <label class="btn primary block">${icon('photo')} 사진 고르기 (여러 장)<input type="file" id="qa-files" accept="image/*" multiple hidden></label>
+    <p class="help" style="margin-top:10px">긴 변 1600px·400KB 이하로 줄여 올리고 위치 정보(EXIF)는 지워요. 원본은 설정에 따라 Google 포토에 보관해요.</p></div>`, {
+    onOpen: (b, close) => {
+      const sel = b.querySelector('#qa-alb');
+      const sync = () => { b.querySelector('#qa-new').hidden = !!sel.value; };
+      sel.onchange = sync;
+      sync();
+      b.querySelector('#qa-files').onchange = async e => {
+        const files = [...e.target.files];
+        if (!files.length) return;
+        try {
+          let a = sel.value ? ctx.core.collection('albums').get(sel.value) : null;
+          if (!a) a = await ctx.core.collection('albums').put(readFields(b.querySelector('#qa-new'), SCHEMA.albums.fields.slice(0, 2)));
+          close();
+          await startUpload(ctx, files, `albums:${a.id}`, { id: a.id, title: a.title, date: a.date });
+          ctx.go(`#/admin/albums/${a.id}`);
+        } catch (err) { toastErr(err); }
+      };
+    },
+  });
+}
+
+async function pickSongPdf(ctx, songs) {
+  await modal(`<div><div class="dlg-h"><h2>PDF 올리기</h2><button class="icon-btn" data-close aria-label="닫기">${icon('x')}</button></div>
+    <label class="f"><span>어느 곡에? (공지에 붙이려면 공지 쓰기에서)</span><select id="qs">${songs.map(s => `<option value="${esc(s.id)}">${esc(s.group)} · ${esc(s.title)}</option>`).join('')}</select></label>
+    <label class="btn primary block">${icon('pdf')} PDF 고르기 (여러 개)<input type="file" id="qs-files" accept="application/pdf" multiple hidden></label></div>`, {
+    onOpen: (b, close) => {
+      b.querySelector('#qs-files').onchange = async e => { const f = [...e.target.files]; if (!f.length) return; close(); await startUpload(ctx, f, `songs:${b.querySelector('#qs').value}`, null); };
+    },
+  });
+}
+
+// ---------- 사진첩 ----------
+function albumList(ctx, body) {
+  const list = ctx.core.collection('albums').list().sort(SCHEMA.albums.sort);
+  body.innerHTML = `<div class="row between"><h1 style="margin:0">사진</h1><div class="row"><button class="btn soft" data-up>${icon('upload')} 사진 올리기</button><button class="btn primary" data-new>${icon('plus')} 새 사진첩</button></div></div>
+    <p class="help" style="margin-top:8px">사진첩은 "행사 + 날짜" 하나씩. 휴대폰에서 여러 장을 한꺼번에 골라 올릴 수 있어요.</p>
+    <div class="albums">${list.map(a => {
+      const ph = ctx.media.forOwner(`albums:${a.id}`).filter(m => m.kind === 'photo');
+      const cover = ph.find(m => m.id === a.cover) || ph[0];
+      if (cover) ctx.reg(cover.id, toEntry(cover));
+      return `<a class="album" href="#/admin/albums/${esc(a.id)}"><span class="ph">${cover ? `<img data-fid="${esc(cover.id)}" alt="">` : ''}</span>
+        <div class="cap"><b>${esc(a.title)}${a.hidden ? ' <span class="chip">숨김</span>' : ''}</b><span class="tiny muted">${esc(dateDot(a.date))} · ${ph.length}장</span></div></a>`;
+    }).join('') || '<div class="card empty" style="grid-column:1/-1">아직 사진첩이 없어요.</div>'}</div>`;
+  body.querySelector('[data-new]').onclick = () => editRecord(ctx, 'albums', null).then(saved => saved && ctx.go(`#/admin/albums/${saved.id}`));
+  body.querySelector('[data-up]').onclick = () => pickAlbumAndUpload(ctx);
+  ctx.hydrate(body);
+}
+
+function albumDetail(ctx, body, id) {
+  const a = ctx.core.collection('albums').get(id);
+  if (!a || a.deletedAt) { body.innerHTML = '<div class="card empty">사진첩을 찾지 못했어요. <a href="#/admin/albums">목록</a></div>'; return; }
+  const all = ctx.media.forOwner(`albums:${id}`);
+  const ph = all.filter(m => m.kind === 'photo');
+  const other = all.filter(m => m.kind !== 'photo');
+  for (const m of all) ctx.reg(m.id, toEntry(m));
+  const coverId = (ph.find(m => m.id === a.cover) || ph[0])?.id;
+  body.innerHTML = `<a class="btn small ghost" href="#/admin/albums">${icon('left')} 사진첩</a>
+    <div class="row between" style="margin-top:6px"><div><h1 style="margin:0">${esc(a.title)}${a.hidden ? ' <span class="chip">학부모에게 숨김</span>' : ''}</h1><span class="muted small">${esc(dateKo(a.date, { year: true }))} · 사진 ${ph.length}장</span></div>
+      <div class="row"><button class="btn ghost" data-edit>${icon('edit')} 고치기</button><label class="btn primary">${icon('upload')} 사진·PDF 올리기<input type="file" id="al-files" multiple accept="image/*,application/pdf" hidden></label></div></div>
+    ${other.length ? `<div class="card" style="margin-top:12px">${other.map(m => `<div class="att">${icon('pdf')}<span class="grow">${esc(m.name)}</span><button class="icon-btn" data-trash="${esc(m.id)}">${icon('trash')}</button></div>`).join('')}</div>` : ''}
+    <div class="adm-photos" style="margin-top:14px">${ph.map(m => `<div class="adm-photo${m.id === coverId ? ' cover' : ''}"><button class="ph" data-view="${esc(m.id)}"><img data-fid="${esc(m.id)}" alt=""></button>
+      <div class="acts"><button data-cover="${esc(m.id)}" title="대표 사진으로" aria-label="대표 사진으로">${icon('pin')}</button><button data-trash="${esc(m.id)}" title="휴지통" aria-label="휴지통">${icon('trash')}</button></div></div>`).join('') || '<div class="card empty" style="grid-column:1/-1">아직 사진이 없어요. 위의 "사진·PDF 올리기"를 누르세요.</div>'}</div>`;
+  body.querySelector('[data-edit]').onclick = () => editRecord(ctx, 'albums', id);
+  body.querySelector('#al-files').onchange = e => startUpload(ctx, e.target.files, `albums:${id}`, { id, title: a.title, date: a.date });
+  body.onclick = async e => {
+    const t = e.target.closest('button');
+    if (!t) return;
+    if (t.dataset.cover) { await ctx.core.collection('albums').patch(id, { cover: t.dataset.cover }); toast('대표 사진으로 정했어요.'); ctx.render(); }
+    else if (t.dataset.trash) { if (await confirmBox('이 사진을 휴지통에 넣을까요? (학부모 화면에서 빠져요. 설정 → 휴지통에서 되살릴 수 있어요)')) { await ctx.core.collection('media').softDelete(t.dataset.trash); ctx.render(); } }
+    else if (t.dataset.view) { const { lightbox } = await import('./views-parent.js'); const list = ph.map(m => ({ id: m.id, n: m.name })); lightbox(ctx, list, list.findIndex(x => x.id === t.dataset.view), a.title); }
+  };
+  ctx.hydrate(body);
+  // 올리기가 끝나면 다시 그린다
+  const un = ctx.uploads;
+  let last = un.snapshot().siteDone;
+  const t = setInterval(() => { if (!body.isConnected) return clearInterval(t); const n = un.snapshot().siteDone; if (n !== last) { last = n; clearInterval(t); ctx.render(); } }, 1500);
+}
+
+// ---------- 명단 (연락처 포함) ----------
+function membersView(ctx, body) {
+  const list = sortMembers(ctx.core.collection('members').list());
+  body.innerHTML = `<div class="row between"><h1 style="margin:0">명단 <span class="chip brand">${list.length}명</span></h1><button class="btn primary" data-new>${icon('plus')} 새 단원</button></div>
+    <div class="warn" style="margin-top:10px">${icon('lock')} 부모님 이름·연락처·비고·성별·입단일은 <b>관리자만</b> 봐요. 학부모 화면에는 이름과 학년만 보여요.</div>
+    <div class="mcards only-narrow">${list.map(m => `<div class="mcard" data-id="${esc(m.id)}"><div class="top"><span class="chip brand">${esc(/^\d+$/.test(m.grade) ? `${m.grade}학년` : m.grade || '')}</span><b>${esc(m.name)}</b><span class="muted small">${esc(m.gender || '')}</span><span class="grow"></span><span class="tiny muted">${esc(m.joined || '')}</span></div>
+      <div class="sub"><span class="priv">${esc(m.parentName || '')}</span>${m.phone ? `<a href="tel:${esc(String(m.phone).replace(/[^\d+]/g, ''))}" data-tel>${icon('phone')} ${esc(m.phone)}</a>` : ''}</div>${m.note ? `<div class="nt">${esc(m.note)}</div>` : ''}</div>`).join('')}</div>
+    <div class="card only-wide" style="padding:0"><div class="tbl-wrap"><table class="tbl"><thead><tr><th>#</th><th>학년</th><th>이름</th><th class="priv">성별</th><th class="priv">부모님</th><th class="priv">연락처</th><th class="priv">비고</th><th class="priv">입단</th></tr></thead>
+    <tbody>${list.map((m, i) => `<tr data-id="${esc(m.id)}"><td>${i + 1}</td><td>${esc(m.grade)}</td><td><b>${esc(m.name)}</b></td><td>${esc(m.gender || '')}</td><td>${esc(m.parentName || '')}</td>
+      <td>${m.phone ? `<a href="tel:${esc(String(m.phone).replace(/[^\d+]/g, ''))}" data-tel>${esc(m.phone)}</a>` : ''}</td><td class="wrap">${esc(m.note || '')}</td><td>${esc(m.joined || '')}</td></tr>`).join('')}</tbody></table></div></div>
+    <p class="help">줄을 누르면 고쳐요. 전화번호를 누르면 전화를 걸어요.</p>`;
+  body.querySelector('[data-new]').onclick = () => editRecord(ctx, 'members', null, { grade: '1' });
+  body.onclick = e => { if (e.target.closest('[data-tel]')) return; const tr = e.target.closest('tr[data-id], .mcard'); if (tr) editRecord(ctx, 'members', tr.dataset.id); };
+}
+
+// ---------- 안내 (사이트 정보) ----------
+function siteView(ctx, body) {
+  const c = ctx.core.collection('settings');
+  const s = c.get('site') || {};
+  const cover = ctx.media.forOwner('site:cover').filter(m => m.kind === 'photo').pop();
+  const files = ctx.media.forOwner('site:info');
+  body.innerHTML = `<h1>안내</h1><p class="help">첫 화면의 환영 글·활동 안내·회비·문의, 명단 위 소개. ${PRIV} 칸은 학부모에게 보이지 않아요.</p>
+    <form class="card" id="sf">${SITE_FIELDS.map(f => fieldHtml(f, s[f.k], ctx)).join('')}<div class="row end"><button class="btn primary">저장</button></div></form>
+    <div class="card"><h3>첫 화면 대표 사진</h3><p class="small muted">${cover ? esc(cover.name) : '없음 (보라색 배경)'}</p>
+      <label class="btn soft">${icon('photo')} 사진 고르기<input type="file" id="cover-in" accept="image/*" hidden></label></div>
+    <div class="card"><h3>안내 자료 (PDF)</h3>${files.map(m => `<div class="att">${icon('pdf')}<span class="grow">${esc(m.name)}</span><button class="icon-btn" data-trash="${esc(m.id)}">${icon('trash')}</button></div>`).join('') || '<p class="small muted">없음</p>'}
+      <label class="btn soft">${icon('upload')} PDF 올리기<input type="file" id="info-in" accept="application/pdf,image/*" multiple hidden></label></div>`;
+  body.querySelector('#sf').onsubmit = async e => {
+    e.preventDefault();
+    try { await c.put({ ...(c.get('site') || {}), ...readFields(body, SITE_FIELDS), id: 'site' }); toast('저장했어요.'); } catch (err) { toastErr(err); }
+  };
+  body.querySelector('#cover-in').onchange = e => startUpload(ctx, e.target.files, 'site:cover', { id: 'site', title: '대표 사진', date: '' });
+  body.querySelector('#info-in').onchange = e => startUpload(ctx, e.target.files, 'site:info', null);
+  body.onclick = async e => { const t = e.target.closest('[data-trash]'); if (t && (await confirmBox('휴지통에 넣을까요?'))) { await ctx.core.collection('media').softDelete(t.dataset.trash); ctx.render(); } };
+}
+
+// ---------- 가져오기 ----------
+function importView(ctx, body) {
+  body.innerHTML = `<h1>가져오기</h1>
+    <div class="card"><h2>노션에서 가져오기</h2>
+      <p class="small">노션 페이지 → 오른쪽 위 ··· → <b>내보내기</b> → 형식 <b>Markdown & CSV</b>, <b>하위 페이지 포함</b> 켜기 → 받은 zip 을 여기에 넣으세요. 이 기기 안에서만 읽어요. 노션 페이지는 그대로 둬요.</p>
+      <label class="btn primary">${icon('upload')} 노션 zip 고르기<input type="file" id="zip-in" accept=".zip,application/zip" hidden></label>
+      <div id="zip-out"></div></div>
+    <div class="card"><h2>준비된 자료 불러오기</h2>
+      <p class="small">처음 설정한 뒤 한 번만: 노션 공개 페이지에서 미리 옮겨 둔 JSON 파일(jayangchoir-seed.json). 연락처가 들어 있으니 불러온 뒤 그 파일은 지워 주세요.</p>
+      <label class="btn soft">${icon('upload')} JSON 고르기<input type="file" id="seed-in" accept=".json,application/json" hidden></label>
+      <div id="seed-out"></div></div>
+    <p class="help">여러 번 가져와도 같은 내용이 두 번 생기지 않아요. 이미 있는 내용은 덮어쓰지 않고 빈 칸만 채워요. 지우는 일은 없어요.</p>`;
+  body.querySelector('#seed-in').onchange = async e => {
+    const out = body.querySelector('#seed-out');
+    try {
+      const plan = JSON.parse(await e.target.files[0].text());
+      if (plan.kind !== 'jayangchoir-seed') throw new Error('준비된 자료 파일이 아니에요.');
+      out.innerHTML = '<p><span class="spin"></span> 넣는 중…</p>';
+      const r = await applyPlan(plan, { core: ctx.core });
+      out.innerHTML = `<div class="ok-box">불러왔어요: ${esc(Object.entries(r.counts).map(([k, n]) => `${k} ${n}`).join(', ') || '바뀐 것 없음 (이미 있어요)')}</div>`;
+      toast('불러왔어요.');
+    } catch (err) { out.innerHTML = `<div class="err">${esc(err.message)}</div>`; }
+    e.target.value = '';
+  };
+  body.querySelector('#zip-in').onchange = async e => {
+    const out = body.querySelector('#zip-out');
+    const file = e.target.files[0];
+    if (!file) return;
+    out.innerHTML = '<p><span class="spin"></span> zip 을 읽는 중… (사진이 많으면 1~2분)</p>';
+    try {
+      const JSZip = await loadJSZip();
+      const { parseNotionZip } = await import('./notion-import.js');
+      const { plan, report } = await parseNotionZip(JSZip, await file.arrayBuffer());
+      const c = report.counts;
+      out.innerHTML = `<div class="ok-box">찾은 것: 일정 ${c.events} · 곡 ${c.songs} (악보 PDF ${c.pdfs}) · 영상 ${c.videos} · 명단 ${c.members}명 · 사진첩 ${c.albums} (사진 ${c.photos}장)</div>
+        ${Object.entries(report.pages).filter(([, v]) => !v).length ? `<div class="warn">찾지 못한 페이지: ${Object.entries(report.pages).filter(([, v]) => !v).map(([k]) => esc(k)).join(', ')}</div>` : ''}
+        ${report.warnings.length ? `<div class="warn">${report.warnings.map(esc).join('<br>')}</div>` : ''}
+        ${plan.albums.length ? `<p class="small">사진첩: ${plan.albums.map(a => `${esc(a.date)} ${esc(a.title)} (${a.photos.length})`).join(', ')}</p>` : ''}
+        <label class="check"><input type="checkbox" id="zip-orig"> 사진 원본을 Google 포토에도 보관 (설정에서 켠 경우)</label>
+        <button class="btn primary" id="zip-go">가져오기</button>`;
+      out.querySelector('#zip-go').onclick = async ev => {
+        await busy(ev.currentTarget, '가져오는 중…', async () => {
+          try {
+            const g = ctx.core.collection('settings').get('google') || {};
+            plan.original = out.querySelector('#zip-orig').checked && !!g.clientId;
+            const r = await applyPlan(plan, { core: ctx.core, uploads: ctx.uploads, media: ctx.media });
+            out.innerHTML = `<div class="ok-box">가져왔어요: ${esc(Object.entries(r.counts).map(([k, n]) => `${k} ${n}`).join(', ') || '새 기록 없음')} · 올릴 파일 ${r.queued}개 (아래 상황판에서 진행을 볼 수 있어요)</div>`;
+          } catch (err) { toastErr(err); }
+        });
+      };
+    } catch (err) { out.innerHTML = `<div class="err">zip 을 읽지 못했어요: ${esc(err.message)}</div>`; }
+    e.target.value = '';
+  };
+}
+
+let jszipP = null;
+function loadJSZip() {
+  if (window.JSZip) return Promise.resolve(window.JSZip);
+  jszipP ||= new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = 'js/vendor/jszip.min.js';
+    s.onload = () => res(window.JSZip);
+    s.onerror = () => { jszipP = null; rej(new Error('zip 도구를 불러오지 못했어요.')); };
+    document.head.append(s);
+  });
+  return jszipP;
+}
+
+// ---------- 설정 ----------
+function settingsView(ctx, body) {
+  const s = ctx.core.status();
+  const g = ctx.core.collection('settings').get('google') || {};
+  body.innerHTML = `<h1>설정</h1>
+    <div class="card"><h3>내 이름</h3><div class="row nowrap"><input id="me" value="${esc(s.user)}"><button class="btn soft" id="me-save">저장</button></div><p class="help" style="margin-top:6px">고친 사람으로 남아요.</p></div>
+    <div class="card"><h3>새 기기 연결 (QR)</h3><p class="small">다른 임원의 휴대폰을 연결할 때 이 QR 을 그 휴대폰 카메라로 찍게 하세요. 단체방에 올리지 말고 직접 보여 주세요.</p><button class="btn soft" id="qr">QR 보여 주기</button></div>
+    <div class="card"><h3>사진 원본 보관 (Google)</h3>
+      <p class="small">사진을 올릴 때 원본(줄이기 전, 촬영 정보 포함)을 합창단 Google 계정(${ACCOUNT_HINT})에 따로 보관해요. 처음 한 번 README 의 "Google 설정" 대로 클라이언트 ID 를 만들어 넣으세요.</p>
+      <label class="f"><span>OAuth 클라이언트 ID</span><input id="g-cid" value="${esc(g.clientId || '')}" placeholder="…apps.googleusercontent.com"></label>
+      <label class="check"><input type="checkbox" id="g-on"${g.enabled !== false ? ' checked' : ''}> 원본을 Google 포토에 보관</label>
+      <label class="f"><span>보관할 곳</span><select id="g-be"><option value="photos"${g.backend !== 'drive' ? ' selected' : ''}>Google 포토 (앨범: 합창단 · 날짜 행사)</option><option value="drive"${g.backend === 'drive' ? ' selected' : ''}>Google Drive (폴더: 합창단 사진 원본/…) — 포토가 안 될 때</option></select></label>
+      <div class="row"><button class="btn soft" id="g-save">저장</button><button class="btn ghost" id="g-sign">${ctx.gAuth.signedIn() ? 'Google 로그인됨 ✓' : 'Google 로그인'}</button></div></div>
+    <div class="card"><h3>관리자 비밀번호 · 복구 코드</h3><div class="row"><button class="btn soft" id="pw">관리자 비밀번호 바꾸기</button><button class="btn soft" id="rc">새 복구 코드</button></div></div>
+    <div class="card"><h3>GitHub 토큰 바꾸기</h3><p class="small">1년에 한 번, 만료되기 전에. 다른 기기는 다음에 열 때 저절로 새 토큰을 써요. README 의 "토큰 만들기" 참고.</p>
+      <div class="row nowrap"><input id="tok" type="password" autocomplete="off" placeholder="새 토큰"><button class="btn soft" id="tok-save">바꾸기</button></div></div>
+    <div class="card"><h3>백업 · 휴지통</h3><div class="row"><button class="btn soft" id="bk">${icon('down')} 백업 받기 (암호화된 그대로)</button><a class="btn soft" href="#/admin/trash">${icon('trash')} 휴지통</a></div></div>
+    <div class="card"><h3>이 기기</h3><div class="row"><button class="btn soft" id="lock">${icon('lock')} 잠그기</button><button class="btn ghost" id="forget" style="color:var(--danger)">이 기기 연결 끊기</button></div>
+      <p class="help" style="margin-top:8px">${s.memoryOnly ? '이 브라우저는 기기에 저장할 수 없어서 탭을 닫으면 다시 연결해야 해요.' : '연결 끊기는 이 기기의 사본만 지워요(GitHub 데이터는 그대로). 아직 못 올린 변경이 있으면 거부해요.'}</p></div>`;
+  const $ = s2 => body.querySelector(s2);
+  $('#me-save').onclick = async () => { await ctx.core.setUser($('#me').value); toast('저장했어요.'); };
+  $('#qr').onclick = async () => {
+    try { const { svg } = await ctx.core.connectDeviceQR(); modal(`<div><h2>새 기기 연결</h2><div class="qr">${svg}</div><p class="small">새 휴대폰 카메라로 찍고, 열린 화면에서 관리자 비밀번호를 넣으세요.</p><div class="row end"><button class="btn primary" data-close>닫기</button></div></div>`); } catch (e) { toastErr(e); }
+  };
+  $('#g-save').onclick = async () => {
+    const cur = ctx.core.collection('settings').get('google') || {};
+    await ctx.core.collection('settings').put({ ...cur, id: 'google', clientId: $('#g-cid').value.trim(), enabled: $('#g-on').checked, backend: $('#g-be').value });
+    toast('저장했어요.');
+  };
+  $('#g-sign').onclick = async () => { try { await ctx.gAuth.signIn(); toast('Google 에 로그인했어요.'); ctx.uploads.kick(); ctx.render(); } catch (e) { toastErr(e); } };
+  $('#pw').onclick = async () => {
+    await modal(`<form><h2>관리자 비밀번호 바꾸기</h2><label class="f"><span>지금 비밀번호</span><input id="op" type="password" required></label><label class="f"><span>새 비밀번호 (8자 이상)</span><input id="np1" type="password" required minlength="8"></label><label class="f"><span>한 번 더</span><input id="np2" type="password" required></label><div class="row end"><button type="button" class="btn ghost" data-close>취소</button><button class="btn primary">바꾸기</button></div></form>`, {
+      onOpen: (b, close) => {
+        b.querySelector('form').onsubmit = async e => {
+          e.preventDefault();
+          try {
+            if (!(await ctx.core.checkPassword(b.querySelector('#op').value))) throw new Error('지금 비밀번호가 맞지 않아요.');
+            if (b.querySelector('#np1').value !== b.querySelector('#np2').value) throw new Error('두 비밀번호가 달라요.');
+            await ctx.core.changePassword(b.querySelector('#np1').value);
+            close();
+            toast('바꿨어요. 다른 기기는 다음에 열 때 새 비밀번호를 물어요.');
+          } catch (err) { toastErr(err); }
+        };
+      },
+    });
+  };
+  $('#rc').onclick = async () => { if (await confirmBox('새 복구 코드를 만들까요? 예전 코드는 바로 못 쓰게 돼요.')) { try { await showRecovery(await ctx.core.newRecoveryCode()); } catch (e) { toastErr(e); } } };
+  $('#tok-save').onclick = async e => { await busy(e.currentTarget, '확인 중…', async () => { try { await ctx.core.rotateToken($('#tok').value.trim()); $('#tok').value = ''; toast('토큰을 바꿨어요.'); } catch (err) { toastErr(err); } }); };
+  $('#bk').onclick = async () => { try { download(new Blob([await ctx.core.exportBackup()], { type: 'application/json' }), `jayangchoir-backup-${ymd()}.json`); } catch (e) { toastErr(e); } };
+  $('#lock').onclick = async () => { await ctx.gAuth.revoke(); ctx.uploads.stop(); await ctx.core.lock(); ctx.render(); };
+  $('#forget').onclick = async () => {
+    if (!(await confirmBox('이 기기의 연결과 사본을 지울까요? GitHub 의 데이터는 그대로예요.', { ok: '연결 끊기', danger: true }))) return;
+    try { await ctx.gAuth.revoke(); await ctx.core.forgetDevice(); ctx.render(); } catch (e) { toastErr(e); }
+  };
+}
+
+// ---------- 휴지통 ----------
+function trashView(ctx, body) {
+  const cols = ['notices', 'events', 'songs', 'videos', 'albums', 'members', 'media'];
+  const name = c => (c === 'media' ? '사진·파일' : SCHEMA[c].name);
+  const label = (c, r) => esc(r.title || r.name || r.id);
+  const rows = cols.flatMap(c => ctx.core.collection(c).trash().map(r => ({ c, r })));
+  body.innerHTML = `<h1>휴지통</h1><p class="help">지운 것은 여기 남아요. 되살리면 원래 자리로 가요. 정말로 없애는 기능은 없어요.</p>
+    <div class="card rows">${rows.map(({ c, r }) => `<div class="rowi"><div class="t"><b>${label(c, r)}</b><small>${esc(name(c))} · ${esc(timeAgo(r.deletedAt))} ${esc(r.deletedBy || '')}</small></div><button class="btn small soft" data-restore="${esc(c)}|${esc(r.id)}">되살리기</button></div>`).join('') || '<div class="empty">비어 있어요.</div>'}</div>`;
+  body.onclick = async e => { const t = e.target.closest('[data-restore]'); if (!t) return; const [c, id] = t.dataset.restore.split('|'); await ctx.core.collection(c).restore(id); toast('되살렸어요.'); ctx.render(); };
+}
+
+void SITE_PRIVATE; void textHtml; void closeModal; void ids;

@@ -1,0 +1,411 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>core 시험</title>
+  <style>
+    :root { color-scheme: light dark; --ok: #1a7f37; --bad: #cf222e; }
+    body { font: 14px/1.5 system-ui, sans-serif; margin: 16px; max-width: 900px; background: Canvas; color: CanvasText; }
+    h1 { font-size: 18px; }
+    li { margin: 2px 0; }
+    .ok { color: var(--ok); }
+    .bad { color: var(--bad); font-weight: 600; }
+    pre { white-space: pre-wrap; font-size: 12px; opacity: .8; }
+    #summary { font-size: 16px; font-weight: 700; }
+  </style>
+</head>
+<body>
+  <h1>js/core 시험 — 인터넷 없이 가짜 GitHub로</h1>
+  <p>암호화 · 비밀번호/복구 코드 · 두 기기 동시 수정 합치기 · 휴지통 · 오프라인 · 파일 · 토큰 교체. 실제 GitHub에는 연결하지 않는다.</p>
+  <p id="summary">시험 중…</p>
+  <ol id="out"></ol>
+  <pre id="log"></pre>
+<script type="module">
+import * as C from './js/core/crypto.js';
+import { mergeRecord } from './js/core/merge.js';
+import { createCore, shardPath } from './js/core/core.js';
+import { FakeRepo } from './js/core/fake-backend.js';
+
+const out = document.getElementById('out');
+const results = [];
+let current = '';
+
+function report(name, ok, detail = '') {
+  results.push({ name, ok, detail });
+  const li = document.createElement('li');
+  li.className = ok ? 'ok' : 'bad';
+  li.textContent = `${ok ? 'PASS' : 'FAIL'} ${name}${detail ? ' — ' + detail : ''}`;
+  out.append(li);
+}
+function assert(cond, msg) {
+  if (!cond) throw new Error(msg);
+}
+const eq = (a, b, msg) => assert(JSON.stringify(a) === JSON.stringify(b), `${msg}: ${JSON.stringify(a)} ≠ ${JSON.stringify(b)}`);
+async function rejects(p, code, msg) {
+  try { await p; } catch (e) { assert(!code || e.code === code, `${msg}: 오류 코드 ${e.code} (기대 ${code}) ${e.message}`); return e; }
+  throw new Error(`${msg}: 오류가 나야 하는데 안 났어요`);
+}
+async function test(name, fn) {
+  current = name;
+  const t0 = performance.now();
+  try {
+    await fn();
+    report(name, true, `${Math.round(performance.now() - t0)}ms`);
+  } catch (e) {
+    console.error(e);
+    report(name, false, e.message);
+  }
+}
+
+const RUN = Date.now().toString(36);
+const dbs = [];
+const PW = 'jayang-yunyeon-2026';
+const PW2 = 'new-password-2027';
+const repo = new FakeRepo(['tok-1']);
+function device(tag) {
+  const dbName = `jc-test-${RUN}-${tag}`;
+  dbs.push(dbName);
+  return createCore({ dbName, backend: token => repo.client(token), autoSync: false, siteUrl: 'https://jayangchoir.github.io/', user: tag });
+}
+const repoText = () => [...repo.files.values()].map(f => new TextDecoder().decode(f.bytes)).join('\n');
+
+let A;
+let B;
+let code;
+
+// ---------- 1. 암호화 ----------
+await test('crypto: 글자·바이트 암호화 왕복, 다른 키·다른 AAD는 실패', async () => {
+  const k = await C.newDEK();
+  const env = await C.encryptText(k.key, '안녕 유년부 ✝', 'data/members/00.enc');
+  eq(await C.decryptText(k.key, env, 'data/members/00.enc'), '안녕 유년부 ✝', '글자 왕복');
+  const k2 = await C.newDEK();
+  await rejects(C.decryptText(k2.key, env, 'data/members/00.enc'), undefined, '다른 키');
+  await rejects(C.decryptText(k.key, env, 'data/members/01.enc'), undefined, '다른 경로(AAD)');
+  const bytes = new Uint8Array(100000);
+  for (let i = 0; i < bytes.length; i += 65536) crypto.getRandomValues(bytes.subarray(i, i + 65536));
+  const enc = await C.encryptBytes(k.key, bytes, 'file:x');
+  eq([...await C.decryptBytes(k.key, enc, 'file:x')].slice(0, 50), [...bytes].slice(0, 50), '바이트 왕복');
+  assert((await C.decryptBytes(k.key, enc, 'file:x')).length === bytes.length, '길이');
+});
+
+await test('crypto: 데이터 키를 비밀번호·복구 코드로 감싸고 풀기 (PBKDF2 60만/20만 회)', async () => {
+  const dek = await C.newDEK();
+  const pw = await C.makeWrap(PW, C.ITER, dek.raw);
+  const rc0 = C.newRecoveryCode();
+  assert(/^([A-Z2-9]{4}-){5}[A-Z2-9]{4}$/.test(rc0), `복구 코드 모양: ${rc0}`);
+  const rc = await C.makeWrap(C.normCode(rc0), C.RITER, dek.raw);
+  eq(C.b64((await C.openWrap(PW, pw)).raw), C.b64(dek.raw), '비밀번호로 푼 키');
+  eq(C.b64((await C.openWrap(C.normCode(rc0.toLowerCase().replace(/-/g, ' ')), rc)).raw), C.b64(dek.raw), '복구 코드(소문자·띄어쓰기)로 푼 키');
+  assert((await C.openWrap('wrong-password', pw)) === null, '틀린 비밀번호');
+  assert((await C.openWrap(C.normCode(C.newRecoveryCode()), rc)) === null, '틀린 복구 코드');
+});
+
+// ---------- 2. 합치기 규칙 (순수 함수) ----------
+await test('merge: 다른 항목은 둘 다, 같은 항목은 늦은 쪽 + 진 값 보관, 지움 vs 고침은 남김', async () => {
+  const base = { id: 'm1', name: '김철수', grade: 2, phone: '010', updatedAt: '2026-11-01T00:00:00Z', updatedBy: 'X', deletedAt: null };
+  const l = { ...base, grade: 3, updatedAt: '2026-11-02T00:00:00Z', updatedBy: 'A' };
+  const r = { ...base, phone: '011', updatedAt: '2026-11-02T00:00:01Z', updatedBy: 'B' };
+  const m = mergeRecord(base, l, r);
+  eq([m.grade, m.phone, m._conflicts], [3, '011', undefined], '다른 항목');
+  const l2 = { ...base, name: '김철수A', updatedAt: '2026-11-02T00:00:00Z', updatedBy: 'A' };
+  const r2 = { ...base, name: '김철수B', updatedAt: '2026-11-02T00:00:05Z', updatedBy: 'B' };
+  const m2 = mergeRecord(base, l2, r2);
+  eq(m2.name, '김철수B', '늦은 쪽');
+  eq(m2._conflicts?.[0]?.value, '김철수A', '진 값 보관');
+  const l3 = { ...base, deletedAt: '2026-11-02T00:00:00Z', deletedBy: 'A', updatedAt: '2026-11-02T00:00:00Z', updatedBy: 'A' };
+  const r3 = { ...base, grade: 4, updatedAt: '2026-11-02T00:00:01Z', updatedBy: 'B' };
+  const m3 = mergeRecord(base, l3, r3);
+  eq([m3.deletedAt, m3.grade, m3._conflicts?.[0]?.field], [null, 4, 'deletedAt'], '지움 vs 고침');
+  eq(mergeRecord(base, base, r), r, '한쪽만 고침');
+  eq(mergeRecord(undefined, l, undefined), l, '한쪽에만 있음');
+});
+
+// ---------- 3. 처음 설정 · 새 기기 연결 ----------
+await test('설정: 관리자가 setup → 복구 코드, vault.json 에 비밀 정보 없음', async () => {
+  A = device('A');
+  await rejects(A.setup('tok-1', 'short'), 'weak-password', '짧은 비밀번호');
+  code = await A.setup('tok-1', PW, { user: '이선생' });
+  assert(/^([A-Z2-9]{4}-){5}[A-Z2-9]{4}$/.test(code), '복구 코드');
+  const vault = repo.files.get('vault.json');
+  assert(vault, 'vault.json 이 저장소에 있음');
+  const vt = new TextDecoder().decode(vault.bytes);
+  assert(!vt.includes('tok-1') && !vt.includes(PW), 'vault.json 에 토큰·비밀번호가 그대로 있지 않음');
+  await rejects(device('A2').setup('tok-1', PW), 'already-setup', '두 번 setup');
+  eq(A.status().state, 'saved', '상태');
+});
+
+await test('기록: put/get/list, GitHub에는 암호문만', async () => {
+  const members = A.collection('members');
+  await members.put({ id: 'kim', name: '김철수', grade: 2, note: '알레르기: 땅콩' });
+  await members.put({ id: 'lee', name: '이영희', grade: 3 });
+  const auto = await members.put({ name: '박민수', grade: 1 });
+  assert(auto.id && auto.createdBy === '이선생' && auto.updatedAt, '자동 id·메타');
+  eq(members.list().map(r => r.name), ['김철수', '이영희', '박민수'], '목록');
+  eq(A.status().pending > 0, true, '올릴 것 있음');
+  await A.sync();
+  eq(A.status().state, 'saved', '동기화 후 저장됨');
+  const txt = repoText();
+  assert(!txt.includes('김철수') && !txt.includes('땅콩') && !txt.includes('kim'), '저장소에 평문 없음');
+  // 내용이 같으면 다시 저장하지 않음
+  const before = members.get('kim').updatedAt;
+  await members.put({ id: 'kim', name: '김철수', grade: 2, note: '알레르기: 땅콩' });
+  eq(members.get('kim').updatedAt, before, '같은 내용은 그대로');
+});
+
+await test('새 기기: QR 링크 → joinFromQR → 비밀번호로 열기 → 같은 데이터', async () => {
+  const { link, svg } = await A.connectDeviceQR();
+  assert(link.startsWith('https://jayangchoir.github.io/#join='), '링크 모양');
+  assert(svg.startsWith('<svg') && svg.length > 1000, 'QR SVG');
+  assert(!link.includes('tok-1'), '링크에 토큰이 그대로 있지 않음');
+  B = device('B');
+  await rejects(B.joinFromQR(link.slice(0, 60)), 'bad-link', '잘린 링크');
+  assert(B.hasJoinLink(link), 'hasJoinLink');
+  await B.joinFromQR(link);
+  await rejects(B.open('wrong-password-x'), 'bad-password', '틀린 비밀번호');
+  await B.open(PW);
+  await B.setUser('박선생');
+  await B.sync();
+  eq(B.collection('members').list().map(r => r.name), ['김철수', '이영희', '박민수'], 'B가 받은 목록');
+});
+
+// ---------- 4. 동시에 고치기 ----------
+await test('동시 수정: 같은 기록의 다른 항목 → 둘 다 남음', async () => {
+  await A.collection('members').patch('kim', { grade: 3 });
+  await B.collection('members').patch('kim', { phone: '010-1234-5678' });
+  await A.sync();
+  await B.sync(); // 409 → 받아서 합치고 올림
+  await A.sync();
+  const a = A.collection('members').get('kim');
+  const b = B.collection('members').get('kim');
+  eq([a.grade, a.phone], [3, '010-1234-5678'], 'A');
+  eq([b.grade, b.phone], [3, '010-1234-5678'], 'B');
+  assert(!a._conflicts, '충돌 표시 없음');
+});
+
+await test('동시 수정: 같은 항목 → 늦게 고친 쪽, 진 값은 _conflicts 에 (사라지지 않음)', async () => {
+  await A.collection('members').patch('lee', { name: '이영희(A)' });
+  await new Promise(r => setTimeout(r, 5));
+  await B.collection('members').patch('lee', { name: '이영희(B)' });
+  await A.sync();
+  await B.sync();
+  await A.sync();
+  const a = A.collection('members').get('lee');
+  const b = B.collection('members').get('lee');
+  eq(a.name, '이영희(B)', '늦은 쪽 이김');
+  eq(b, a, '두 기기 같음');
+  eq(a._conflicts.map(c => [c.field, c.value, c.by]), [['name', '이영희(A)', '이선생']], '진 값 보관');
+  eq(A.collection('members').conflicts().length, 1, 'conflicts()');
+  await A.collection('members').clearConflicts('lee');
+  await A.sync();
+  await B.sync();
+  assert(!B.collection('members').get('lee')._conflicts, '확인 후 지운 표시가 B에도');
+});
+
+await test('동시 수정: 같은 조각에 서로 새 기록 → 둘 다 남음 (올리는 도중 끼어들기 포함)', async () => {
+  const ids = [];
+  for (let i = 0; ids.length < 2; i++) if (shardPath('giftLog', `g${i}`) === shardPath('giftLog', 'g0')) ids.push(`g${i}`);
+  await A.collection('giftLog').put({ id: ids[0], member: 'kim', gift: '연필', qty: 1 });
+  await B.collection('giftLog').put({ id: ids[1], member: 'lee', gift: '공책', qty: 2 });
+  // A가 올리기 직전에 B가 먼저 올린다
+  const c0 = repo.conflicts;
+  repo.beforePut = () => B.sync();
+  await A.sync();
+  assert(repo.conflicts > c0, 'A가 409를 받고 합쳐서 다시 올림');
+  await B.sync();
+  eq(A.collection('giftLog').list().map(r => r.id).sort(), ids.slice().sort(), 'A');
+  eq(B.collection('giftLog').list().map(r => r.id).sort(), ids.slice().sort(), 'B');
+  assert(repo.log.filter(x => x[0] === 'put').length > 0, 'put 기록');
+});
+
+await test('동시 수정: 한쪽은 휴지통, 다른 쪽은 고침 → 지우지 않고 남김', async () => {
+  await A.collection('members').softDelete(A.collection('members').list().find(r => r.name === '박민수').id);
+  const pid = B.collection('members').list().find(r => r.name === '박민수').id;
+  await new Promise(r => setTimeout(r, 5));
+  await B.collection('members').patch(pid, { grade: 2 });
+  await A.sync();
+  await B.sync();
+  await A.sync();
+  const a = A.collection('members').get(pid);
+  eq([a.deletedAt, a.grade], [null, 2], '남음 + 고친 값');
+  eq(a._conflicts?.some(c => c.field === 'deletedAt'), true, '지운 기록은 _conflicts 에');
+});
+
+await test('올리는 도중에 이 기기에서 또 고침 → 잃지 않고 다음 동기화 때 올라감', async () => {
+  const m = A.collection('members');
+  await m.patch('kim', { memo: '첫째' });
+  repo.beforePut = () => m.patch('kim', { memo: '둘째' });
+  await A.sync();
+  eq(m.get('kim').memo, '둘째', '이 기기 값');
+  assert(A.status().pending > 0, '둘째는 아직 올릴 것');
+  await A.sync();
+  await B.sync();
+  eq(B.collection('members').get('kim').memo, '둘째', 'B가 받음');
+});
+
+// ---------- 5. 휴지통 ----------
+await test('휴지통: softDelete → 목록에서 빠지고 trash 에 → restore, 다른 기기에도', async () => {
+  const g = A.collection('gifts');
+  const r = await g.put({ name: '스티커', price: 500 });
+  await g.softDelete(r.id);
+  eq(g.list().length, 0, '목록에서 빠짐');
+  eq(g.trash().map(x => x.id), [r.id], '휴지통');
+  eq(g.get(r.id).deletedBy, '이선생', '지운 사람');
+  await A.sync();
+  await B.sync();
+  eq(B.collection('gifts').trash().map(x => x.name), ['스티커'], 'B 휴지통');
+  await B.collection('gifts').restore(r.id);
+  await B.sync();
+  await A.sync();
+  eq(A.collection('gifts').list().map(x => x.name), ['스티커'], 'A 되살림');
+  eq(A.collection('gifts').list({ deleted: 'all' }).length, 1, "list({deleted:'all'})");
+  assert(typeof g.delete === 'undefined' && typeof g.remove === 'undefined', '진짜 지우는 함수 없음');
+});
+
+// ---------- 6. 오프라인 ----------
+await test('오프라인: 저장은 이 기기에, 잠갔다 열어도 남고, 연결되면 올라감. 그동안 연결 끊기 거부', async () => {
+  repo.online = false;
+  await A.collection('verses').put({ id: 'v45', ref: '빌립보서 4:4', lines: ['주 안에서 항상 기뻐하라'] });
+  const s = await A.sync();
+  eq(s.state, 'offline', '오프라인 상태');
+  assert(s.pending > 0, '올릴 것 남음');
+  await rejects(A.forgetDevice(), 'unsaved', '못 올린 것이 있으면 연결 끊기 거부');
+  await A.lock();
+  eq(A.status().state, 'locked', '잠김');
+  assert(await A.hasUnsaved(), '잠겨도 못 올린 것을 앎');
+  await A.open(PW); // 인터넷 없이도 열림 (vault 사본)
+  eq(A.collection('verses').get('v45').ref, '빌립보서 4:4', '다시 열어도 있음');
+  repo.online = true;
+  eq((await A.sync()).state, 'saved', '연결 후 올라감');
+  await B.sync();
+  eq(B.collection('verses').get('v45').lines, ['주 안에서 항상 기뻐하라'], 'B가 받음');
+});
+
+// ---------- 7. 파일 ----------
+await test('파일: 암호화해 올리고 다른 기기에서 받기, 큰 사진은 줄이기', async () => {
+  const raw = crypto.getRandomValues(new Uint8Array(3000));
+  const meta = await A.files.put(new Blob([raw], { type: 'application/octet-stream' }), { name: 'x.bin' });
+  const cv = document.createElement('canvas');
+  cv.width = 3000; cv.height = 2000;
+  const g = cv.getContext('2d');
+  g.fillStyle = '#d9792b'; g.fillRect(0, 0, 3000, 2000);
+  g.fillStyle = '#fff'; g.font = '200px sans-serif'; g.fillText('유년부', 400, 1000);
+  const jpg = await new Promise(r => cv.toBlob(r, 'image/jpeg', 0.95));
+  const pic = await A.files.put(jpg, { name: 'photo.jpg' });
+  eq([pic.w, pic.h, pic.type], [1600, 1067, 'image/jpeg'], '사진 줄임');
+  await A.sync();
+  assert(repo.files.has(`files/${meta.id}.bin`) && repo.files.has(`files/${pic.id}.bin`), '저장소에 올라감');
+  await B.sync();
+  const got = new Uint8Array(await (await B.files.get(meta.id)).arrayBuffer());
+  eq([...got], [...raw], 'B가 받은 바이트');
+  const pb = await B.files.get(pic.id);
+  eq([pb.type, pb.size], ['image/jpeg', pic.size], 'B가 받은 사진');
+  assert((await B.files.url(pic.id)).startsWith('blob:'), 'url()');
+});
+
+// ---------- 8. 비밀번호를 잊었을 때 ----------
+await test('복구: 복구 코드로 새 비밀번호 → 다른 기기는 잠기고 새 비밀번호로 열림, 데이터 그대로', async () => {
+  await A.recover('WRONG-CODE-0000-0000-0000-0000', PW2).then(() => { throw new Error('틀린 코드가 통과'); }, e => assert(e.code === 'bad-code', e.code));
+  await A.recover(code.toLowerCase(), PW2);
+  eq(A.status().open, true, 'A 열림');
+  await B.collection('themes').put({ id: 'm11', images: [] }); // B가 잠기기 전에 고친 것
+  const s = await B.sync();
+  eq([s.state, s.errorCode], ['locked', 'password-changed'], 'B 잠김');
+  assert(await B.hasUnsaved(), 'B의 못 올린 것은 남아 있음');
+  await rejects(B.open(PW), 'bad-password', '예전 비밀번호');
+  await B.open(PW2);
+  await B.sync();
+  await A.sync();
+  eq(A.collection('themes').get('m11')?.id, 'm11', 'B가 고친 것이 올라감');
+  eq(B.collection('members').get('kim').grade, 3, '데이터 그대로');
+});
+
+await test('비밀번호 바꾸기·새 복구 코드: 예전 코드는 못 씀', async () => {
+  await A.changePassword(PW);
+  const code2 = await A.newRecoveryCode();
+  assert(code2 !== code, '새 코드');
+  await rejects(A.recover(code, PW2), 'bad-code', '예전 복구 코드');
+  await A.open(PW);
+  await B.sync(); // 비밀번호가 바뀌어 B 잠김
+  eq(B.status().errorCode, 'password-changed', 'B 잠김');
+  await B.open(PW);
+  code = code2;
+});
+
+// ---------- 9. 토큰 바꾸기 ----------
+await test('토큰 교체: 새 토큰을 vault 에 → 다른 기기가 다음 동기화 때 바꿔 씀 → 예전 토큰 지워도 계속', async () => {
+  repo.addToken('tok-2');
+  await A.rotateToken('tok-2');
+  await B.sync();
+  repo.revoke('tok-1');
+  await B.collection('gifts').put({ name: '색연필' });
+  eq((await B.sync()).state, 'saved', 'B 새 토큰으로 저장');
+  await A.sync();
+  eq(A.collection('gifts').list().map(g => g.name).sort(), ['색연필', '스티커'], 'A가 받음');
+  const C2 = device('C');
+  const { link } = await A.connectDeviceQR();
+  await C2.joinFromQR(link);
+  await C2.open(PW);
+  eq((await C2.sync()).state, 'saved', '새 QR로 연결한 기기');
+  eq(C2.collection('gifts').list().length, 2, 'C 데이터');
+  await C2.lock();
+});
+
+await test('예전 토큰만 가진 기기 → 오류 "token" (데이터는 그대로)', async () => {
+  repo.addToken('tok-3');
+  await A.rotateToken('tok-3');
+  repo.revoke('tok-2'); // B가 바꿔 쓰기 전에 바로 지움
+  await B.collection('gifts').put({ name: '지우개' });
+  const s = await B.sync();
+  eq([s.state, s.errorCode], ['error', 'token'], 'B 오류');
+  assert(await B.hasUnsaved(), 'B의 변경은 남음');
+  // 관리자가 새 QR로 다시 연결 → 남은 변경도 올라감
+  const { link } = await A.connectDeviceQR();
+  await B.joinFromQR(link);
+  await B.open(PW);
+  eq((await B.sync()).state, 'saved', '다시 연결 후 올라감');
+  await A.sync();
+  assert(A.collection('gifts').list().some(g => g.name === '지우개'), 'A가 받음');
+});
+
+// ---------- 10. 비밀번호 없이 다시 열기 ----------
+await test('이 기기 기억: lock → resume, 비밀번호가 바뀌면 다시 비밀번호', async () => {
+  await A.rememberDevice(30);
+  await A.lock();
+  eq(await A.resume(), true, 'resume');
+  eq(A.collection('members').get('kim').name, '김철수', '데이터');
+  await B.changePassword(PW2);
+  await A.sync();
+  eq(A.status().errorCode, 'password-changed', 'A 잠김');
+  eq(await A.resume(), false, '기억 정보는 버려짐');
+  await A.open(PW2);
+});
+
+await test('백업 내보내기 · 연결 끊기(다 올린 뒤에만)', async () => {
+  const bk = JSON.parse(await A.exportBackup());
+  assert(bk.kind === 'jayangchoir-core-backup' && Object.keys(bk.shards).length > 3 && bk.vault.pw, '백업 모양');
+  assert(!JSON.stringify(bk).includes('김철수'), '백업도 암호문');
+  await A.sync();
+  await B.sync();
+  await B.forgetDevice();
+  eq(B.status().connected, false, 'B 연결 끊김');
+  eq(repo.files.has('vault.json'), true, 'GitHub 데이터는 그대로');
+});
+
+// ---------- 끝 ----------
+await A.lock();
+for (const n of dbs) indexedDB.deleteDatabase(n);
+const fails = results.filter(r => !r.ok);
+const summary = `${fails.length ? 'FAIL' : 'PASS'} ${results.length - fails.length}/${results.length}`;
+document.getElementById('summary').textContent = summary;
+document.getElementById('summary').className = fails.length ? 'bad' : 'ok';
+document.title = `core 시험 ${summary}`;
+document.body.dataset.done = summary;
+document.getElementById('log').textContent = `저장소 파일 ${repo.files.size}개, 요청 ${repo.log.length}번\n` + [...repo.files.keys()].join('\n');
+if (new URLSearchParams(location.search).has('report')) {
+  fetch('/__report', { method: 'POST', body: JSON.stringify({ summary, results }) }).catch(() => {});
+}
+</script>
+</body>
+</html>

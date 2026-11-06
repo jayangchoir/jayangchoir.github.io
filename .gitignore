@@ -1,0 +1,6 @@
+tools/_tmp*
+node_modules/
+# 개인정보가 든 자료는 절대 커밋하지 않는다
+*seed*.json
+*.seed.json
+choir-seed/
